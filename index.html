@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="shogun-dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shogun Drive - Decentralized File Storage</title>
+    
+    <!-- DaisyUI + Tailwind CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@5.0.43/dist/full.min.css" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Gun.js -->
+    <script src="https://cdn.jsdelivr.net/npm/gun/gun.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/gun/sea.js"></script>
+    
+    <!-- Tailwind Config for Shogun Theme -->
+    <script>
+        tailwind.config = {
+            darkMode: ["class", '[data-theme="shogun-dark"]'],
+            theme: {
+                extend: {
+                    colors: {
+                        'shogun-primary': '#4F6BF6',
+                        'shogun-primary-light': '#6B84F8',
+                        'shogun-primary-dark': '#3A52D4',
+                    },
+                    fontFamily: {
+                        sans: ['Poppins', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'],
+                    },
+                }
+            }
+        }
+    </script>
+</head>
+<body class="antialiased">
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+</body>
+</html>
+
