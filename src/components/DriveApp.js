@@ -32,7 +32,7 @@ export class DriveApp {
   }
 
   initTheme() {
-    const savedTheme = localStorage.getItem('shogun-drive-theme') || 'shogun-dark';
+    const savedTheme = localStorage.getItem('shogun-drive-theme') || 'dark';
     document.documentElement.setAttribute('data-theme', savedTheme);
   }
 
@@ -94,8 +94,11 @@ export class DriveApp {
     container.innerHTML = `
       <div class="drive-header">
         <div class="header-left">
-          <h1 class="drive-title">Shogun Drive</h1>
-          <p class="drive-subtitle">Decentralized Encrypted File Storage</p>
+          <img src="/logo.svg" alt="Drive" class="drive-logo" width="64" height="64">
+          <div class="drive-title-wrapper">
+            <h1 class="drive-title">Drive</h1>
+            <p class="drive-subtitle">Decentralized Encrypted File Storage</p>
+          </div>
         </div>
         <div class="header-right">
           <span id="connectionStatus" class="connection-status disconnected" title="Connection status">● Checking...</span>
@@ -462,7 +465,7 @@ export class DriveApp {
     const sunIcon = this.container.querySelector('#sunIcon');
     const moonIcon = this.container.querySelector('#moonIcon');
     
-    if (currentTheme === 'shogun-light') {
+    if (currentTheme === 'light') {
       sunIcon.style.display = 'none';
       moonIcon.style.display = 'block';
     } else {
@@ -474,7 +477,7 @@ export class DriveApp {
   toggleTheme() {
     const html = document.documentElement;
     const currentTheme = html.getAttribute('data-theme');
-    const newTheme = currentTheme === 'shogun-dark' ? 'shogun-light' : 'shogun-dark';
+    const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
     
     html.setAttribute('data-theme', newTheme);
     localStorage.setItem('shogun-drive-theme', newTheme);
@@ -482,7 +485,7 @@ export class DriveApp {
     // Update icons
     this.updateThemeIcons();
     
-    this.showStatus(`Theme changed to ${newTheme === 'shogun-dark' ? 'Dark' : 'Light'} mode`, 'info');
+    this.showStatus(`Theme changed to ${newTheme === 'dark' ? 'Dark' : 'Light'} mode`, 'info');
   }
 }
 
