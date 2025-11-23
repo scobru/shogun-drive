@@ -1,6 +1,10 @@
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@100..800&display=swap");
 
+@import "tailwindcss";
+@plugin "daisyui";
 /* === CUSTOM STYLES PER SHOGUN-DRIVE === */
 /* Drive App Styles - Usa variabili DaisyUI */
+
 
 /* Ensure html and body have correct background */
 html {
@@ -25,6 +29,10 @@ html[data-theme="dark"] body {
 /* Smooth theme transitions */
 * {
   transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+}
+
+body {
+  font-family: 'JetBrains Mono', monospace;
 }
 
 .drive-app {

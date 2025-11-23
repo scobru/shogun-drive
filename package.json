@@ -11,7 +11,8 @@
     "@tailwindcss/vite": "^4.1.17",
     "daisyui": "^5.5.5",
     "gun": "^0.2020.1241",
-    "tailwindcss": "^4.1.17"
+    "tailwindcss": "^4.1.17",
+    "vercel": "^48.10.10"
   },
   "devDependencies": {
     "vite": "^5.4.8"
