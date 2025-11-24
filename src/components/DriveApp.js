@@ -97,7 +97,6 @@ export class DriveApp {
           <img src="/logo.svg" alt="Drive" class="drive-logo" width="64" height="64">
           <div class="drive-title-wrapper">
             <h1 class="drive-title">Drive</h1>
-            <p class="drive-subtitle">Decentralized Encrypted File Storage</p>
           </div>
         </div>
         <div class="header-right">
