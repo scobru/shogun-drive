@@ -28,8 +28,8 @@ Browser → IPFS Kubo (direct API calls)
 
 **Before:**
 - `/api/v1/ipfs/upload` - Custom relay endpoint
-- `/api/v1/ipfs/pins/ls` - Custom relay endpoint
-- `/api/v1/ipfs/pins/rm` - Custom relay endpoint
+- `/api/v1/ipfs/pin/ls` (GET) - List pins (Kubo-aligned)
+- `/api/v1/ipfs/pin/rm` (POST) - Remove pin (Kubo-aligned)
 - `/api/v1/ipfs/status` - Custom relay endpoint
 
 **After:**
@@ -62,7 +62,8 @@ Browser → IPFS Kubo (direct API calls)
 ### 4. File Download
 
 **Before:**
-- `/ipfs-content/{CID}` - Custom relay endpoint with server-side decryption
+- `/api/v1/ipfs/cat/{CID}` - Stream content (Kubo-aligned)
+- `/api/v1/ipfs/cat/{CID}/decrypt?token=...` - Stream with server-side decryption
 
 **After:**
 - `/ipfs/{CID}` - Standard IPFS gateway
