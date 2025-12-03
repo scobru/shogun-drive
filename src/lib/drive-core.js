@@ -165,10 +165,9 @@ export class DriveCore {
       const timeoutId = setTimeout(() => controller.abort(), 5000);
       
       // Prova a fare una richiesta semplice per verificare l'auth
-      const response = await fetch(`${this.relayUrl}/api/v1/ipfs/pins/ls`, {
-        method: 'POST',
+      const response = await fetch(`${this.relayUrl}/api/v1/ipfs/pin/ls`, {
+        method: 'GET',
         headers: {
-          'Content-Type': 'application/json',
           'Authorization': `Bearer ${this.authToken}`
         },
         signal: controller.signal
@@ -269,7 +268,7 @@ export class DriveCore {
         fileSize: fileToUpload.size ?? file.size, // Usa la dimensione del file caricato (criptato o meno)
         isEncrypted: isEncrypted,
         contentType: fileToUpload.type || file.type || 'application/octet-stream',
-        relayUrl: `${this.relayUrl}/ipfs-content/${ipfsHash}${isEncrypted ? `?token=${encodeURIComponent(this.encryptionToken || this.authToken)}` : ''}`,
+        relayUrl: `${this.relayUrl}/api/v1/ipfs/cat/${ipfsHash}${isEncrypted ? `/decrypt?token=${encodeURIComponent(this.encryptionToken || this.authToken)}` : ''}`,
         uploadedAt: now
       };
 
@@ -307,12 +306,10 @@ export class DriveCore {
     }
 
     // Il relay server decripta automaticamente se il token è presente nella query string
-    // Usa /ipfs-content/ invece di /api/v1/ipfs/content/ per la decrittazione
-    let url = `${this.relayUrl}/ipfs-content/${hash}`;
-    if (metadata.isEncrypted) {
-      const separator = url.includes('?') ? '&' : '?';
-      url = `${url}${separator}token=${encodeURIComponent(this.encryptionToken || this.authToken)}`;
-    }
+    // Usa /api/v1/ipfs/cat/:cid/decrypt per la decrittazione
+    let url = metadata.isEncrypted 
+      ? `${this.relayUrl}/api/v1/ipfs/cat/${hash}/decrypt?token=${encodeURIComponent(this.encryptionToken || this.authToken)}`
+      : `${this.relayUrl}/api/v1/ipfs/cat/${hash}`;
 
     this.onStatusChange({ status: 'downloading', message: 'Downloading from IPFS...' });
 
@@ -656,10 +653,9 @@ export class DriveCore {
       const controller1 = new AbortController();
       const timeoutId1 = setTimeout(() => controller1.abort(), 10000);
       
-      const pinsResponse = await fetch(`${this.relayUrl}/api/v1/ipfs/pins/ls`, {
-        method: 'POST',
+      const pinsResponse = await fetch(`${this.relayUrl}/api/v1/ipfs/pin/ls`, {
+        method: 'GET',
         headers: {
-          'Content-Type': 'application/json',
           'Authorization': `Bearer ${this.authToken}`
         },
         signal: controller1.signal
@@ -802,11 +798,9 @@ export class DriveCore {
         // Costruisci relayUrl con token se il file è criptato
         let relayUrl = metadata.relayUrl;
         if (!relayUrl) {
-          relayUrl = `${this.relayUrl}/ipfs-content/${cid}`;
-          if (metadata.isEncrypted && (this.encryptionToken || this.authToken)) {
-            const separator = relayUrl.includes('?') ? '&' : '?';
-            relayUrl = `${relayUrl}${separator}token=${encodeURIComponent(this.encryptionToken || this.authToken)}`;
-          }
+          relayUrl = metadata.isEncrypted && (this.encryptionToken || this.authToken)
+            ? `${this.relayUrl}/api/v1/ipfs/cat/${cid}/decrypt?token=${encodeURIComponent(this.encryptionToken || this.authToken)}`
+            : `${this.relayUrl}/api/v1/ipfs/cat/${cid}`;
         }
         
         // Per i file criptati, il contentType salvato è "text/plain" (file criptato)
@@ -877,7 +871,7 @@ export class DriveCore {
     }
 
     try {
-      const response = await fetch(`${this.relayUrl}/api/v1/ipfs/pins/rm`, {
+      const response = await fetch(`${this.relayUrl}/api/v1/ipfs/pin/rm`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
