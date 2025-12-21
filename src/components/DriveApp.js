@@ -1,24 +1,28 @@
-import { DriveCore } from '../lib/drive-core.js';
-import { FileGrid } from './FileGrid.js';
-import { UploadArea } from './UploadArea.js';
-import { SettingsPanel } from './SettingsPanel.js';
+import { DriveCore } from "../lib/drive-core.js";
+import { FileGrid } from "./FileGrid.js";
+import { UploadArea } from "./UploadArea.js";
+import { SettingsPanel } from "./SettingsPanel.js";
 
 export class DriveApp {
   constructor() {
     this.driveCore = new DriveCore({
       onProgress: (progress) => this.handleProgress(progress),
-      onStatusChange: (status) => this.handleStatusChange(status)
+      onStatusChange: (status) => this.handleStatusChange(status),
     });
-    
+
     this.files = [];
     this.isLoading = false;
     this.currentStatus = null;
-    this.authToken = localStorage.getItem('shogun-drive-token') || '';
-    this.relayUrl = localStorage.getItem('shogun-drive-relay-url') || window.location.origin;
-    this.encryptionToken = localStorage.getItem('shogun-drive-encryption-token') || '';
+    this.authToken = localStorage.getItem("shogun-drive-token") || "";
+    this.relayUrl =
+      localStorage.getItem("shogun-drive-relay-url") || window.location.origin;
+    this.encryptionToken =
+      localStorage.getItem("shogun-drive-encryption-token") || "";
     this.isConnected = false;
     this.isAuthenticated = false;
-    
+    this.currentPath = []; // Array per tracciare il percorso di navigazione (stack di directory)
+    this.currentDirectoryCid = null; // CID della directory corrente (null = root)
+
     if (this.authToken) {
       this.driveCore.setAuthToken(this.authToken);
       this.driveCore.relayUrl = this.relayUrl;
@@ -26,24 +30,27 @@ export class DriveApp {
     if (this.encryptionToken) {
       this.driveCore.setEncryptionToken(this.encryptionToken);
     }
-    
+
     // Initialize theme from localStorage
     this.initTheme();
   }
 
   initTheme() {
-    const savedTheme = localStorage.getItem('shogun-drive-theme') || 'dark';
-    document.documentElement.setAttribute('data-theme', savedTheme);
+    const savedTheme = localStorage.getItem("shogun-drive-theme") || "dark";
+    document.documentElement.setAttribute("data-theme", savedTheme);
   }
 
   async init() {
     // Verifica connessione e autenticazione
     await this.checkConnection();
-    
+
     if (this.authToken && this.isConnected && this.isAuthenticated) {
       await this.loadFiles();
     } else if (this.authToken) {
-      this.showStatus('Please check your connection and authentication settings', 'warning');
+      this.showStatus(
+        "Please check your connection and authentication settings",
+        "warning"
+      );
     }
   }
 
@@ -60,7 +67,7 @@ export class DriveApp {
       this.isAuthenticated = await this.driveCore.checkAuthentication();
       this.updateConnectionStatus();
     } catch (error) {
-      console.error('Connection check error:', error);
+      console.error("Connection check error:", error);
       this.isConnected = false;
       this.isAuthenticated = false;
       this.updateConnectionStatus();
@@ -70,27 +77,27 @@ export class DriveApp {
   updateConnectionStatus() {
     if (!this.container) return;
 
-    const statusIndicator = this.container.querySelector('#connectionStatus');
+    const statusIndicator = this.container.querySelector("#connectionStatus");
     if (statusIndicator) {
       if (this.isConnected && this.isAuthenticated) {
-        statusIndicator.className = 'connection-status connected';
-        statusIndicator.textContent = '● Connected';
-        statusIndicator.title = 'Connected and authenticated';
+        statusIndicator.className = "connection-status connected";
+        statusIndicator.textContent = "● Connected";
+        statusIndicator.title = "Connected and authenticated";
       } else if (this.isConnected) {
-        statusIndicator.className = 'connection-status warning';
-        statusIndicator.textContent = '● Auth Failed';
-        statusIndicator.title = 'Connected but authentication failed';
+        statusIndicator.className = "connection-status warning";
+        statusIndicator.textContent = "● Auth Failed";
+        statusIndicator.title = "Connected but authentication failed";
       } else {
-        statusIndicator.className = 'connection-status disconnected';
-        statusIndicator.textContent = '● Disconnected';
-        statusIndicator.title = 'Cannot connect to relay server';
+        statusIndicator.className = "connection-status disconnected";
+        statusIndicator.textContent = "● Disconnected";
+        statusIndicator.title = "Cannot connect to relay server";
       }
     }
   }
 
   render() {
-    const container = document.createElement('div');
-    container.className = 'drive-app';
+    const container = document.createElement("div");
+    container.className = "drive-app";
     container.innerHTML = `
       <div class="drive-header">
         <div class="header-left">
@@ -131,6 +138,13 @@ export class DriveApp {
             </svg>
             Upload Files
           </button>
+          <button id="uploadFolderBtn" class="btn-primary">
+            <svg xmlns="http://www.w3.org/2000/svg" class="icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+            </svg>
+            Upload Folder
+          </button>
+          <div id="breadcrumb" class="breadcrumb" style="display: none;"></div>
         </div>
         <div class="toolbar-right">
           <div class="search-box">
@@ -196,72 +210,93 @@ export class DriveApp {
       files: this.files,
       onFileClick: (file) => this.handleFileClick(file),
       onFileDelete: (file) => this.handleFileDelete(file),
-      onFileDownload: (file) => this.handleFileDownload(file)
+      onFileDownload: (file) => this.handleFileDownload(file),
+      onFolderClick: (folder) => this.handleFolderClick(folder),
     });
 
     this.uploadArea = new UploadArea({
       onUpload: (files) => this.handleUpload(files),
       onDragOver: () => this.handleDragOver(),
-      onDragLeave: () => this.handleDragLeave()
+      onDragLeave: () => this.handleDragLeave(),
     });
 
     this.settingsPanel = new SettingsPanel({
       authToken: this.authToken,
       relayUrl: this.relayUrl,
       encryptionToken: this.encryptionToken,
-      onSave: (settings) => this.handleSettingsSave(settings)
+      onSave: (settings) => this.handleSettingsSave(settings),
     });
 
-    const fileGridContainer = container.querySelector('#fileGridContainer');
-    const uploadAreaContainer = container.querySelector('#uploadAreaContainer');
-    const settingsPanelContainer = container.querySelector('#settingsPanelContainer');
+    const fileGridContainer = container.querySelector("#fileGridContainer");
+    const uploadAreaContainer = container.querySelector("#uploadAreaContainer");
+    const settingsPanelContainer = container.querySelector(
+      "#settingsPanelContainer"
+    );
 
     fileGridContainer.appendChild(this.fileGrid.render());
     uploadAreaContainer.appendChild(this.uploadArea.render());
     settingsPanelContainer.appendChild(this.settingsPanel.render());
 
     // Event listeners
-    container.querySelector('#uploadBtn').addEventListener('click', () => {
+    container.querySelector("#uploadBtn").addEventListener("click", () => {
       this.uploadArea.show();
     });
 
-    container.querySelector('#refreshBtn').addEventListener('click', async () => {
-      await this.checkConnection();
-      await this.loadFiles();
-    });
+    container
+      .querySelector("#uploadFolderBtn")
+      .addEventListener("click", () => {
+        const folderInput =
+          this.uploadArea.container.querySelector("#folderInput");
+        if (folderInput) {
+          folderInput.click();
+        }
+      });
 
-    container.querySelector('#settingsBtn').addEventListener('click', () => {
+    container
+      .querySelector("#refreshBtn")
+      .addEventListener("click", async () => {
+        await this.checkConnection();
+        await this.loadFiles();
+      });
+
+    container.querySelector("#settingsBtn").addEventListener("click", () => {
       this.toggleSettings();
     });
 
-    container.querySelector('#themeToggleBtn').addEventListener('click', () => {
+    container.querySelector("#themeToggleBtn").addEventListener("click", () => {
       this.toggleTheme();
     });
 
-    container.querySelector('#searchInput').addEventListener('input', (e) => {
+    container.querySelector("#searchInput").addEventListener("input", (e) => {
       this.fileGrid.filter(e.target.value);
     });
 
     this.container = container;
-    
+
     // Update theme icons based on current theme
     this.updateThemeIcons();
-    
+
     // Inizializza dopo che il container è stato creato
     this.init();
-    
+
     return container;
   }
 
   async loadFiles() {
     if (!this.authToken) {
-      this.showStatus('Please configure your auth token in settings', 'warning');
+      this.showStatus(
+        "Please configure your auth token in settings",
+        "warning"
+      );
       return;
     }
 
     // Verifica connessione prima di caricare i file
     if (!this.isConnected || !this.isAuthenticated) {
-      this.showStatus('Not connected or authenticated. Please check your settings.', 'warning');
+      this.showStatus(
+        "Not connected or authenticated. Please check your settings.",
+        "warning"
+      );
       await this.checkConnection();
       if (!this.isConnected || !this.isAuthenticated) {
         return;
@@ -269,21 +304,28 @@ export class DriveApp {
     }
 
     this.isLoading = true;
-    this.showStatus('Loading files...', 'info');
+    this.showStatus("Loading files...", "info");
 
     try {
-      this.files = await this.driveCore.getFileList();
+      if (this.currentDirectoryCid) {
+        // Carica contenuto della directory corrente
+        this.files = await this.loadDirectoryContents(this.currentDirectoryCid);
+      } else {
+        // Carica file root
+        this.files = await this.driveCore.getFileList();
+      }
+
       this.fileGrid.updateFiles(this.files);
       if (this.files.length > 0) {
-        this.showStatus(`Loaded ${this.files.length} file(s)`, 'success');
+        this.showStatus(`Loaded ${this.files.length} item(s)`, "success");
       } else {
-        this.showStatus('No files found', 'info');
+        this.showStatus("No files found", "info");
       }
     } catch (error) {
-      const errorMessage = error.message || 'Unknown error';
-      this.showStatus(`Error loading files: ${errorMessage}`, 'error');
-      console.error('Error loading files:', error);
-      
+      const errorMessage = error.message || "Unknown error";
+      this.showStatus(`Error loading files: ${errorMessage}`, "error");
+      console.error("Error loading files:", error);
+
       // Aggiorna lo stato di connessione se c'è un errore
       await this.checkConnection();
     } finally {
@@ -291,83 +333,207 @@ export class DriveApp {
     }
   }
 
-  async handleUpload(files) {
+  async loadDirectoryContents(directoryCid) {
+    try {
+      console.log(`📂 Loading directory contents for CID: ${directoryCid}`);
+
+      // Prova a ottenere i contenuti della directory
+      const directoryData = await this.driveCore.getDirectoryContents(
+        directoryCid
+      );
+
+      console.log("📂 Directory data received:", directoryData);
+
+      // Converti i dati della directory in formato file
+      const files = [];
+
+      // Se directoryData ha una struttura con Links o altri metadati
+      if (directoryData.Links && Array.isArray(directoryData.Links)) {
+        console.log(
+          `📂 Found ${directoryData.Links.length} items in directory`
+        );
+
+        for (const link of directoryData.Links) {
+          const fileCid = link.Hash || link.hash;
+          const fileName = link.Name || link.name || fileCid;
+
+          // Determina il tipo MIME in base all'estensione del file
+          const ext = fileName.split(".").pop()?.toLowerCase() || "";
+          const mimeTypes = {
+            png: "image/png",
+            jpg: "image/jpeg",
+            jpeg: "image/jpeg",
+            gif: "image/gif",
+            webp: "image/webp",
+            svg: "image/svg+xml",
+            mp4: "video/mp4",
+            webm: "video/webm",
+            mp3: "audio/mpeg",
+            wav: "audio/wav",
+            pdf: "application/pdf",
+            txt: "text/plain",
+            json: "application/json",
+            html: "text/html",
+            css: "text/css",
+            js: "application/javascript",
+            enc: "text/plain", // File criptato
+          };
+          const contentType = mimeTypes[ext] || "application/octet-stream";
+
+          files.push({
+            cid: fileCid,
+            name: fileName,
+            originalName: fileName,
+            size: link.Size || link.size || 0,
+            type: contentType,
+            isEncrypted: fileName.endsWith(".enc"),
+            uploadedAt: Date.now(),
+            relayUrl: `${this.relayUrl}/api/v1/ipfs/cat/${fileCid}`,
+            isDirectory: link.Type === 1 || link.type === 1, // Type 1 = directory in IPFS
+            parentDirectory: directoryCid,
+            relativePath: fileName,
+          });
+        }
+      } else {
+        console.warn("📂 No Links found in directory data:", directoryData);
+      }
+
+      console.log(`📂 Processed ${files.length} files from directory`);
+      return files;
+    } catch (error) {
+      console.error("❌ Error loading directory contents:", error);
+      // Se non riesce a caricare i contenuti, mostra un errore
+      throw new Error(`Failed to load directory contents: ${error.message}`);
+    }
+  }
+
+  async handleUpload(files, isFolder = false) {
     if (!this.authToken) {
-      this.showStatus('Please configure your auth token in settings', 'error');
+      this.showStatus("Please configure your auth token in settings", "error");
       this.toggleSettings();
       this.uploadArea.hide();
       return;
     }
 
-    let successCount = 0;
-    let errorCount = 0;
+    try {
+      if (isFolder || (files.length > 0 && files[0].webkitRelativePath)) {
+        // Upload come directory
+        const folderName =
+          files[0]?.webkitRelativePath?.split("/")[0] || "folder";
+        this.showStatus(
+          `Uploading folder "${folderName}" with ${files.length} file(s)...`,
+          "info"
+        );
 
-    for (const file of files) {
-      try {
-        this.showStatus(`Uploading ${file.name}...`, 'info');
-        await this.driveCore.uploadFile(file, { encrypt: true });
-        successCount++;
-        this.showStatus(`${file.name} uploaded successfully`, 'success');
-      } catch (error) {
-        errorCount++;
-        this.showStatus(`Error uploading ${file.name}: ${error.message}`, 'error');
-        console.error('Upload error:', error);
-      }
-    }
+        const result = await this.driveCore.uploadDirectory(files, {
+          encrypt: true,
+          folderName: folderName,
+        });
 
-    // Nascondi l'area di upload dopo il completamento
-    this.uploadArea.hide();
+        this.showStatus(
+          `Folder "${folderName}" uploaded successfully`,
+          "success"
+        );
 
-    // Ricarica i file solo se almeno un upload è riuscito
-    // Aspetta un po' per dare tempo ai metadati di essere salvati in Gun
-    if (successCount > 0) {
-      try {
-        // Aspetta 1 secondo per dare tempo a Gun di salvare i metadati
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // Ricarica i file
+        await new Promise((resolve) => setTimeout(resolve, 1000));
         await this.loadFiles();
-      } catch (error) {
-        console.error('Error reloading files:', error);
-      }
-    }
+      } else {
+        // Upload file singoli
+        let successCount = 0;
+        let errorCount = 0;
 
-    // Mostra riepilogo
-    if (successCount > 0 && errorCount === 0) {
-      this.showStatus(`Successfully uploaded ${successCount} file(s)`, 'success');
-    } else if (successCount > 0 && errorCount > 0) {
-      this.showStatus(`Uploaded ${successCount} file(s), ${errorCount} failed`, 'warning');
-    } else if (errorCount > 0) {
-      this.showStatus(`Failed to upload ${errorCount} file(s)`, 'error');
+        for (const file of files) {
+          try {
+            this.showStatus(`Uploading ${file.name}...`, "info");
+            await this.driveCore.uploadFile(file, { encrypt: true });
+            successCount++;
+            this.showStatus(`${file.name} uploaded successfully`, "success");
+          } catch (error) {
+            errorCount++;
+            this.showStatus(
+              `Error uploading ${file.name}: ${error.message}`,
+              "error"
+            );
+            console.error("Upload error:", error);
+          }
+        }
+
+        // Ricarica i file solo se almeno un upload è riuscito
+        if (successCount > 0) {
+          try {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            await this.loadFiles();
+          } catch (error) {
+            console.error("Error reloading files:", error);
+          }
+        }
+
+        // Mostra riepilogo
+        if (successCount > 0 && errorCount === 0) {
+          this.showStatus(
+            `Successfully uploaded ${successCount} file(s)`,
+            "success"
+          );
+        } else if (successCount > 0 && errorCount > 0) {
+          this.showStatus(
+            `Uploaded ${successCount} file(s), ${errorCount} failed`,
+            "warning"
+          );
+        } else if (errorCount > 0) {
+          this.showStatus(`Failed to upload ${errorCount} file(s)`, "error");
+        }
+      }
+    } catch (error) {
+      this.showStatus(`Error uploading: ${error.message}`, "error");
+      console.error("Upload error:", error);
+    } finally {
+      // Nascondi l'area di upload dopo il completamento
+      this.uploadArea.hide();
     }
   }
 
   async handleFileDownload(file) {
     try {
-      this.showStatus(`Downloading ${file.name}...`, 'info');
-      const blob = await this.driveCore.downloadFile(file.cid, file);
-      
+      this.showStatus(`Downloading ${file.name}...`, "info");
+
+      let blob;
+      // Se il file è dentro una directory, usa catFromDirectory
+      if (file.parentDirectory && file.relativePath) {
+        blob = await this.driveCore.catFromDirectory(
+          file.parentDirectory,
+          file.relativePath
+        );
+      } else {
+        blob = await this.driveCore.downloadFile(file.cid, file);
+      }
+
       // Rimuovi l'estensione .enc se presente nel nome del file
       let downloadName = file.originalName || file.name;
-      if (file.isEncrypted && downloadName.endsWith('.enc')) {
+      if (file.isEncrypted && downloadName.endsWith(".enc")) {
         downloadName = downloadName.slice(0, -4); // Rimuovi .enc
       }
-      
+
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
+      const a = document.createElement("a");
       a.href = url;
       a.download = downloadName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      
+
       // Revoca l'URL dopo un breve delay per assicurarsi che il download sia iniziato
       setTimeout(() => {
         URL.revokeObjectURL(url);
       }, 100);
 
-      this.showStatus(`${downloadName} downloaded successfully`, 'success');
+      this.showStatus(`${downloadName} downloaded successfully`, "success");
     } catch (error) {
-      this.showStatus(`Error downloading ${file.name}: ${error.message}`, 'error');
-      console.error('Download error:', error);
+      this.showStatus(
+        `Error downloading ${file.name}: ${error.message}`,
+        "error"
+      );
+      console.error("Download error:", error);
     }
   }
 
@@ -377,28 +543,107 @@ export class DriveApp {
     }
 
     try {
-      this.showStatus(`Deleting ${file.name}...`, 'info');
+      this.showStatus(`Deleting ${file.name}...`, "info");
       await this.driveCore.deleteFile(file.cid);
-      this.showStatus(`${file.name} deleted successfully`, 'success');
+      this.showStatus(`${file.name} deleted successfully`, "success");
       // Aspetta un po' prima di ricaricare per dare tempo al relay di aggiornare
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 500));
       await this.loadFiles();
     } catch (error) {
-      this.showStatus(`Error deleting ${file.name}: ${error.message}`, 'error');
+      this.showStatus(`Error deleting ${file.name}: ${error.message}`, "error");
     }
   }
 
+  async handleFolderClick(folder) {
+    // Naviga dentro la cartella
+    this.currentPath.push({
+      cid: this.currentDirectoryCid,
+      name: this.currentDirectoryCid ? "Folder" : "Root",
+    });
+    this.currentDirectoryCid = folder.cid;
+    this.updateBreadcrumb();
+    await this.loadFiles();
+  }
+
+  async navigateToPath(pathIndex) {
+    // Naviga al percorso specificato nel breadcrumb
+    if (pathIndex < 0) {
+      // Root
+      this.currentPath = [];
+      this.currentDirectoryCid = null;
+    } else {
+      // Naviga fino al punto specificato
+      this.currentPath = this.currentPath.slice(0, pathIndex + 1);
+      const targetPath = this.currentPath[pathIndex];
+      this.currentDirectoryCid = targetPath.cid;
+    }
+    this.updateBreadcrumb();
+    await this.loadFiles();
+  }
+
+  updateBreadcrumb() {
+    const breadcrumbEl = this.container?.querySelector("#breadcrumb");
+    if (!breadcrumbEl) return;
+
+    if (this.currentPath.length === 0 && !this.currentDirectoryCid) {
+      breadcrumbEl.style.display = "none";
+      return;
+    }
+
+    breadcrumbEl.style.display = "flex";
+    breadcrumbEl.innerHTML = `
+      <button class="breadcrumb-item" data-path="-1">🏠 Root</button>
+      ${this.currentPath
+        .map(
+          (path, index) => `
+        <span class="breadcrumb-separator">/</span>
+        <button class="breadcrumb-item" data-path="${index}">${path.name}</button>
+      `
+        )
+        .join("")}
+      ${
+        this.currentDirectoryCid
+          ? `
+        <span class="breadcrumb-separator">/</span>
+        <span class="breadcrumb-current">${this.currentDirectoryCid.substring(
+          0,
+          12
+        )}...</span>
+      `
+          : ""
+      }
+    `;
+
+    // Aggiungi event listeners ai breadcrumb items
+    breadcrumbEl.querySelectorAll(".breadcrumb-item").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const pathIndex = parseInt(btn.dataset.path);
+        this.navigateToPath(pathIndex);
+      });
+    });
+  }
+
   handleFileClick(file) {
+    // Se è una directory, apri la directory
+    if (file.isDirectory || file.type === "application/x-directory") {
+      this.handleFolderClick(file);
+      return;
+    }
+
     // Preview o apri file
     // Assicurati che il relayUrl includa il token se il file è criptato
     let url = file.relayUrl;
-    if (file.isEncrypted && this.authToken && !url.includes('token=')) {
-      const separator = url.includes('?') ? '&' : '?';
+    if (file.isEncrypted && this.authToken && !url.includes("token=")) {
+      const separator = url.includes("?") ? "&" : "?";
       url = `${url}${separator}token=${encodeURIComponent(this.authToken)}`;
     }
-    
-    if (file.type.startsWith('image/') || file.type.startsWith('video/') || file.type.startsWith('audio/')) {
-      window.open(url, '_blank', 'noopener');
+
+    if (
+      file.type.startsWith("image/") ||
+      file.type.startsWith("video/") ||
+      file.type.startsWith("audio/")
+    ) {
+      window.open(url, "_blank", "noopener");
     } else {
       this.handleFileDownload(file);
     }
@@ -407,14 +652,17 @@ export class DriveApp {
   handleProgress(progress) {
     // Gestisci progresso upload/download
     if (progress.progress) {
-      this.showStatus(`Progress: ${progress.progress}%`, 'info');
+      this.showStatus(`Progress: ${progress.progress}%`, "info");
     }
   }
 
   handleStatusChange(status) {
     this.currentStatus = status;
     if (status.message) {
-      this.showStatus(status.message, status.status === 'error' ? 'error' : 'info');
+      this.showStatus(
+        status.message,
+        status.status === "error" ? "error" : "info"
+      );
     }
   }
 
@@ -422,43 +670,49 @@ export class DriveApp {
     this.authToken = settings.authToken;
     this.relayUrl = settings.relayUrl;
     this.encryptionToken = settings.encryptionToken || this.encryptionToken;
-    
-    localStorage.setItem('shogun-drive-token', this.authToken);
-    localStorage.setItem('shogun-drive-relay-url', this.relayUrl);
+
+    localStorage.setItem("shogun-drive-token", this.authToken);
+    localStorage.setItem("shogun-drive-relay-url", this.relayUrl);
     if (this.encryptionToken) {
-      localStorage.setItem('shogun-drive-encryption-token', this.encryptionToken);
+      localStorage.setItem(
+        "shogun-drive-encryption-token",
+        this.encryptionToken
+      );
     } else {
-      localStorage.removeItem('shogun-drive-encryption-token');
+      localStorage.removeItem("shogun-drive-encryption-token");
     }
-    
+
     this.driveCore.setAuthToken(this.authToken);
     this.driveCore.relayUrl = this.relayUrl;
     if (this.encryptionToken) {
       this.driveCore.setEncryptionToken(this.encryptionToken);
     }
-    
+
     this.toggleSettings();
-    
+
     // Verifica connessione e autenticazione
     await this.checkConnection();
-    
+
     if (this.isConnected && this.isAuthenticated) {
       await this.loadFiles();
     } else {
-      this.showStatus('Please check your connection and authentication', 'warning');
+      this.showStatus(
+        "Please check your connection and authentication",
+        "warning"
+      );
     }
   }
 
   toggleSettings() {
-    const panel = this.container.querySelector('#settingsPanelContainer');
-    const grid = this.container.querySelector('#fileGridContainer');
-    
-    if (panel.style.display === 'none') {
-      panel.style.display = 'block';
-      grid.style.display = 'none';
+    const panel = this.container.querySelector("#settingsPanelContainer");
+    const grid = this.container.querySelector("#fileGridContainer");
+
+    if (panel.style.display === "none") {
+      panel.style.display = "block";
+      grid.style.display = "none";
     } else {
-      panel.style.display = 'none';
-      grid.style.display = 'block';
+      panel.style.display = "none";
+      grid.style.display = "block";
     }
   }
 
@@ -470,27 +724,27 @@ export class DriveApp {
     // Gestisci drag leave se necessario
   }
 
-  showStatus(message, type = 'info') {
+  showStatus(message, type = "info") {
     if (!this.container) {
       // Container non ancora creato, salva il messaggio per dopo
       console.log(`[${type.toUpperCase()}] ${message}`);
       return;
     }
-    
-    const statusBar = this.container.querySelector('#statusBar');
+
+    const statusBar = this.container.querySelector("#statusBar");
     if (!statusBar) {
       console.log(`[${type.toUpperCase()}] ${message}`);
       return;
     }
-    
+
     statusBar.textContent = message;
     statusBar.className = `status-bar status-${type}`;
-    statusBar.style.display = 'block';
+    statusBar.style.display = "block";
 
-    if (type === 'success' || type === 'error') {
+    if (type === "success" || type === "error") {
       setTimeout(() => {
         if (statusBar) {
-          statusBar.style.display = 'none';
+          statusBar.style.display = "none";
         }
       }, 3000);
     }
@@ -498,33 +752,35 @@ export class DriveApp {
 
   updateThemeIcons() {
     if (!this.container) return;
-    
+
     const html = document.documentElement;
-    const currentTheme = html.getAttribute('data-theme');
-    const sunIcon = this.container.querySelector('#sunIcon');
-    const moonIcon = this.container.querySelector('#moonIcon');
-    
-    if (currentTheme === 'light') {
-      sunIcon.style.display = 'none';
-      moonIcon.style.display = 'block';
+    const currentTheme = html.getAttribute("data-theme");
+    const sunIcon = this.container.querySelector("#sunIcon");
+    const moonIcon = this.container.querySelector("#moonIcon");
+
+    if (currentTheme === "light") {
+      sunIcon.style.display = "none";
+      moonIcon.style.display = "block";
     } else {
-      sunIcon.style.display = 'block';
-      moonIcon.style.display = 'none';
+      sunIcon.style.display = "block";
+      moonIcon.style.display = "none";
     }
   }
 
   toggleTheme() {
     const html = document.documentElement;
-    const currentTheme = html.getAttribute('data-theme');
-    const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-    
-    html.setAttribute('data-theme', newTheme);
-    localStorage.setItem('shogun-drive-theme', newTheme);
-    
+    const currentTheme = html.getAttribute("data-theme");
+    const newTheme = currentTheme === "dark" ? "light" : "dark";
+
+    html.setAttribute("data-theme", newTheme);
+    localStorage.setItem("shogun-drive-theme", newTheme);
+
     // Update icons
     this.updateThemeIcons();
-    
-    this.showStatus(`Theme changed to ${newTheme === 'dark' ? 'Dark' : 'Light'} mode`, 'info');
+
+    this.showStatus(
+      `Theme changed to ${newTheme === "dark" ? "Dark" : "Light"} mode`,
+      "info"
+    );
   }
 }
-

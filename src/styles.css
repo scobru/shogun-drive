@@ -172,6 +172,44 @@ html[data-theme="dark"] .drive-app {
   gap: 1rem;
 }
 
+/* Breadcrumb */
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: hsl(var(--b2));
+  border: 1px solid hsl(var(--bc) / 0.2);
+  border-radius: 0.25rem;
+  font-size: 0.875rem;
+}
+
+.breadcrumb-item {
+  background: none;
+  border: none;
+  color: hsl(var(--p));
+  cursor: pointer;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.25rem;
+  transition: all 0.2s ease;
+  font-size: inherit;
+}
+
+.breadcrumb-item:hover {
+  background: hsl(var(--p) / 0.1);
+  color: hsl(var(--pf));
+}
+
+.breadcrumb-separator {
+  color: hsl(var(--bc) / 0.5);
+  user-select: none;
+}
+
+.breadcrumb-current {
+  color: hsl(var(--bc));
+  font-weight: 600;
+}
+
 .btn-primary {
   background: hsl(var(--p));
   color: hsl(var(--pc));
@@ -350,6 +388,26 @@ html[data-theme="dark"] .drive-app {
   font-size: 0.7rem;
   font-weight: 600;
   margin-top: 0.5rem;
+}
+
+.directory-badge {
+  display: inline-block;
+  background: hsl(var(--s) / 0.2);
+  color: hsl(var(--s));
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.25rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  margin-top: 0.5rem;
+}
+
+.file-card-directory {
+  border-color: hsl(var(--s) / 0.3);
+}
+
+.file-card-directory:hover {
+  border-color: hsl(var(--s));
+  box-shadow: 0 12px 40px hsl(var(--s) / 0.15);
 }
 
 .file-actions {

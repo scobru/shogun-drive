@@ -1,4 +1,4 @@
-import { DriveCore } from '../lib/drive-core.js';
+import { DriveCore } from "../lib/drive-core.js";
 
 export class FileGrid {
   constructor(options = {}) {
@@ -7,12 +7,13 @@ export class FileGrid {
     this.onFileClick = options.onFileClick || (() => {});
     this.onFileDelete = options.onFileDelete || (() => {});
     this.onFileDownload = options.onFileDownload || (() => {});
+    this.onFolderClick = options.onFolderClick || (() => {});
     this.driveCore = new DriveCore();
   }
 
   render() {
-    const container = document.createElement('div');
-    container.className = 'file-grid-container';
+    const container = document.createElement("div");
+    container.className = "file-grid-container";
     this.container = container;
     this.updateFiles(this.files);
     return container;
@@ -29,10 +30,11 @@ export class FileGrid {
       this.filteredFiles = this.files;
     } else {
       const term = searchTerm.toLowerCase();
-      this.filteredFiles = this.files.filter(file => 
-        file.name.toLowerCase().includes(term) ||
-        file.originalName.toLowerCase().includes(term) ||
-        file.cid.toLowerCase().includes(term)
+      this.filteredFiles = this.files.filter(
+        (file) =>
+          file.name.toLowerCase().includes(term) ||
+          file.originalName.toLowerCase().includes(term) ||
+          file.cid.toLowerCase().includes(term)
       );
     }
     this.renderGrid();
@@ -56,25 +58,32 @@ export class FileGrid {
 
     this.container.innerHTML = `
       <div class="file-grid">
-        ${this.filteredFiles.map(file => this.renderFileCard(file)).join('')}
+        ${this.filteredFiles.map((file) => this.renderFileCard(file)).join("")}
       </div>
     `;
 
     // Aggiungi event listeners
-    this.container.querySelectorAll('.file-card').forEach(card => {
+    this.container.querySelectorAll(".file-card").forEach((card) => {
       const cid = card.dataset.cid;
-      const file = this.filteredFiles.find(f => f.cid === cid);
-      
-      card.querySelector('.file-card-content').addEventListener('click', () => {
-        this.onFileClick(file);
+      const file = this.filteredFiles.find((f) => f.cid === cid);
+
+      card.querySelector(".file-card-content").addEventListener("click", () => {
+        if (file.isDirectory || file.type === "application/x-directory") {
+          this.onFolderClick(file);
+        } else {
+          this.onFileClick(file);
+        }
       });
 
-      card.querySelector('.file-download-btn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        this.onFileDownload(file);
-      });
+      const downloadBtn = card.querySelector(".file-download-btn");
+      if (downloadBtn) {
+        downloadBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.onFileDownload(file);
+        });
+      }
 
-      card.querySelector('.file-delete-btn').addEventListener('click', (e) => {
+      card.querySelector(".file-delete-btn").addEventListener("click", (e) => {
         e.stopPropagation();
         this.onFileDelete(file);
       });
@@ -82,38 +91,62 @@ export class FileGrid {
   }
 
   renderFileCard(file) {
-    const icon = this.driveCore.getFileIcon(file.type);
-    const size = this.driveCore.formatBytes(file.size);
+    const isDirectory =
+      file.isDirectory || file.type === "application/x-directory";
+    const icon = this.driveCore.getFileIcon(file.type, isDirectory);
+    const size = isDirectory
+      ? file.fileCount
+        ? `${file.fileCount} files`
+        : "Folder"
+      : this.driveCore.formatBytes(file.size);
     // Assicurati che la data sia valida (non futura)
     const uploadedAt = file.uploadedAt || Date.now();
     const uploadDate = new Date(uploadedAt);
     // Se la data è futura o invalida, usa la data corrente
-    const validDate = (uploadDate.getTime() > Date.now() || isNaN(uploadDate.getTime())) 
-      ? new Date() 
-      : uploadDate;
+    const validDate =
+      uploadDate.getTime() > Date.now() || isNaN(uploadDate.getTime())
+        ? new Date()
+        : uploadDate;
     const date = validDate.toLocaleDateString();
-    const encryptedBadge = file.isEncrypted ? '<span class="encrypted-badge">🔒 Encrypted</span>' : '';
+    const encryptedBadge = file.isEncrypted
+      ? '<span class="encrypted-badge">🔒 Encrypted</span>'
+      : "";
+    const directoryBadge = isDirectory
+      ? '<span class="directory-badge">📁 Folder</span>'
+      : "";
 
     return `
-      <div class="file-card" data-cid="${file.cid}">
+      <div class="file-card ${
+        isDirectory ? "file-card-directory" : ""
+      }" data-cid="${file.cid}">
         <div class="file-card-content">
           <div class="file-icon">${icon}</div>
           <div class="file-info">
-            <div class="file-name" title="${file.name}">${this.truncate(file.name, 30)}</div>
+            <div class="file-name" title="${file.name}">${this.truncate(
+      file.name,
+      30
+    )}</div>
             <div class="file-meta">
               <span>${size}</span>
               <span>•</span>
               <span>${date}</span>
             </div>
             ${encryptedBadge}
+            ${directoryBadge}
           </div>
         </div>
         <div class="file-actions">
+          ${
+            !isDirectory
+              ? `
           <button class="file-action-btn file-download-btn" title="Download">
             <svg xmlns="http://www.w3.org/2000/svg" class="icon-sm" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
             </svg>
           </button>
+          `
+              : ""
+          }
           <button class="file-action-btn file-delete-btn" title="Delete">
             <svg xmlns="http://www.w3.org/2000/svg" class="icon-sm" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -126,7 +159,6 @@ export class FileGrid {
 
   truncate(str, maxLength) {
     if (str.length <= maxLength) return str;
-    return str.substring(0, maxLength - 3) + '...';
+    return str.substring(0, maxLength - 3) + "...";
   }
 }
-
