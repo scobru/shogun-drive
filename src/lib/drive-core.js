@@ -10,13 +10,28 @@ export class DriveCore {
     this.relayUrl = options.relayUrl || window.location.origin;
     this.authToken = options.authToken || null;
     this.encryptionToken = options.encryptionToken || null;
+    this.userAddress = options.userAddress || "";
+    this.walletSignature = options.walletSignature || "";
     this.onProgress = options.onProgress || (() => {});
     this.onStatusChange = options.onStatusChange || (() => {});
 
-    // Inizializza SDK del relay
+    // Initialize relay SDK with multi-user support headers
+    this._initSDK();
+  }
+
+  /**
+   * Initialize or reinitialize the SDK with current settings
+   */
+  _initSDK() {
     this.sdk = new ShogunRelaySDK({
       baseURL: this.relayUrl,
       token: this.authToken,
+      userAddress: this.userAddress,
+      // Send user address and signature headers for multi-user support
+      extraHeaders: {
+        "X-User-Address": this.userAddress || undefined,
+        "X-Wallet-Signature": this.walletSignature || undefined,
+      },
     });
   }
 
@@ -29,15 +44,21 @@ export class DriveCore {
 
   setRelayUrl(relayUrl) {
     this.relayUrl = relayUrl;
-    // Ricrea l'SDK con il nuovo URL
-    this.sdk = new ShogunRelaySDK({
-      baseURL: this.relayUrl,
-      token: this.authToken,
-    });
+    this._initSDK();
   }
 
   setEncryptionToken(token) {
     this.encryptionToken = token;
+  }
+
+  setUserAddress(userAddress) {
+    this.userAddress = userAddress || "";
+    this._initSDK();
+  }
+
+  setWalletSignature(signature) {
+    this.walletSignature = signature || "";
+    this._initSDK();
   }
 
   /**
@@ -176,8 +197,15 @@ export class DriveCore {
 
   /**
    * Verifica autenticazione
+   * With wallet auth, having a userAddress is sufficient for user-level access
    */
   async checkAuthentication() {
+    // If we have a userAddress (from wallet), user is authenticated for their own files
+    if (this.userAddress) {
+      return true;
+    }
+    
+    // Admin token check for elevated access
     if (!this.authToken) {
       return false;
     }
@@ -215,8 +243,9 @@ export class DriveCore {
   async uploadDirectory(files, options = {}) {
     const { encrypt = true, folderName = null } = options;
 
-    if (!this.authToken) {
-      throw new Error("Auth token is required. Please set it in settings.");
+    // Allow upload if we have authToken (admin) or userAddress (wallet user)
+    if (!this.authToken && !this.userAddress) {
+      throw new Error("Please connect your wallet or set auth token in settings.");
     }
 
     if (!files || files.length === 0) {
@@ -394,8 +423,9 @@ export class DriveCore {
    * @returns Promise con il CID della directory creata
    */
   async createEmptyDirectory(folderName) {
-    if (!this.authToken) {
-      throw new Error("Auth token is required. Please set it in settings.");
+    // Allow operation if we have authToken (admin) or userAddress (wallet user)
+    if (!this.authToken && !this.userAddress) {
+      throw new Error("Please connect your wallet or set auth token in settings.");
     }
 
     // Verifica connessione al relay
@@ -501,8 +531,9 @@ export class DriveCore {
   async uploadFile(file, options = {}) {
     const { encrypt = true, fileName = null } = options;
 
-    if (!this.authToken) {
-      throw new Error("Auth token is required. Please set it in settings.");
+    // Allow upload if we have authToken (admin) or userAddress (wallet user)
+    if (!this.authToken && !this.userAddress) {
+      throw new Error("Please connect your wallet or set auth token in settings.");
     }
 
     // Verifica connessione al relay
@@ -579,20 +610,66 @@ export class DriveCore {
     }
 
     try {
-      // Usa SDK per upload file
-      const result = await this.sdk.ipfs.uploadFileBrowser(fileToUploadFile);
+      let ipfsHash;
+      
+      // Use direct fetch for wallet mode (SDK doesn't support extraHeaders)
+      if (this.walletSignature && this.userAddress) {
+        console.log("📤 Using wallet auth for upload");
+        
+        const formData = new FormData();
+        formData.append("file", fileToUploadFile);
+        
+        const headers = {
+          "X-User-Address": this.userAddress,
+          "X-Wallet-Signature": this.walletSignature,
+        };
+        
+        // Add auth token if available (admin mode)
+        if (this.authToken) {
+          headers["Authorization"] = `Bearer ${this.authToken}`;
+        }
+        
+        const response = await fetch(`${this.relayUrl}/api/v1/ipfs/upload`, {
+          method: "POST",
+          headers,
+          body: formData,
+        });
+        
+        const result = await response.json();
+        
+        if (!response.ok) {
+          // Handle specific error cases
+          if (response.status === 401) {
+            throw new Error(result.hint || result.error || "Authentication failed - check wallet signature");
+          }
+          if (response.status === 402) {
+            throw new Error("Subscription required - please purchase a subscription to upload files");
+          }
+          throw new Error(result.error || `Upload failed with status ${response.status}`);
+        }
+        
+        if (!result.success || !result.file?.hash) {
+          throw new Error(result.error || "Upload failed - invalid response");
+        }
+        
+        ipfsHash = result.file.hash;
+      } else {
+        // Use SDK for admin mode (with auth token)
+        console.log("📤 Using SDK for upload (admin mode)");
+        const result = await this.sdk.ipfs.uploadFileBrowser(fileToUploadFile);
 
-      if (!result.success || !result.file?.hash) {
-        throw new Error(result.error || "Upload failed - invalid response");
+        if (!result.success || !result.file?.hash) {
+          throw new Error(result.error || "Upload failed - invalid response");
+        }
+        
+        ipfsHash = result.file.hash;
       }
-
-      const ipfsHash = result.file.hash;
 
       // Salva metadati nel sistema (come in upload.html)
       const now = Date.now();
       const metadata = {
         hash: ipfsHash,
-        userAddress: "drive-user",
+        userAddress: this.userAddress || "drive-user",
         timestamp: now,
         fileName: uploadFileName,
         displayName: uploadFileName, // Usa uploadFileName come displayName (come in upload.html)
@@ -714,8 +791,9 @@ export class DriveCore {
     newFiles,
     existingFilesMetadata = []
   ) {
-    if (!this.authToken) {
-      throw new Error("Auth token is required. Please set it in settings.");
+    // Allow operation if we have authToken (admin) or userAddress (wallet user)
+    if (!this.authToken && !this.userAddress) {
+      throw new Error("Please connect your wallet or set auth token in settings.");
     }
 
     this.onStatusChange({
@@ -1570,11 +1648,77 @@ export class DriveCore {
   }
 
   /**
+   * Get user uploads from relay server (for wallet mode)
+   * Uses the same endpoint as shogun-deals to fetch user-specific uploads
+   */
+  async getUserUploads(userAddress) {
+    if (!userAddress) {
+      throw new Error("User address is required");
+    }
+
+    try {
+      console.log(`📋 Fetching user uploads for ${userAddress.slice(0, 8)}...`);
+      
+      // Use SDK for consistency
+      const data = await this.sdk.uploads.getUserUploads(userAddress);
+      
+      if (!data.success) {
+        throw new Error(data.error || "Failed to fetch user uploads");
+      }
+
+      const uploads = data.uploads || [];
+      console.log(`📋 Found ${uploads.length} uploads for user`);
+
+      // Map uploads to DriveCore format
+      const files = uploads.map((upload) => {
+        // Detect if file is encrypted based on mimetype and name
+        const isEncrypted = 
+          upload.mimetype === "text/plain" && 
+          (upload.name?.endsWith(".enc") || upload.name?.endsWith(".encrypted"));
+
+        // Build relay URL with decrypt endpoint if encrypted
+        const relayUrl = isEncrypted && (this.encryptionToken || this.authToken)
+          ? `${this.relayUrl}/api/v1/ipfs/cat/${upload.hash}/decrypt?token=${encodeURIComponent(
+              this.encryptionToken || this.authToken
+            )}`
+          : `${this.relayUrl}/api/v1/ipfs/cat/${upload.hash}`;
+
+        return {
+          cid: upload.hash,
+          name: upload.name || upload.hash,
+          originalName: upload.name || upload.hash,
+          size: upload.size || 0,
+          type: upload.mimetype || "application/octet-stream",
+          isEncrypted: isEncrypted,
+          isDirectory: false,
+          fileCount: 0,
+          uploadedAt: upload.uploadedAt || Date.now(),
+          relayUrl: relayUrl,
+          metadata: {
+            ...upload,
+            userAddress: userAddress,
+            displayName: upload.name,
+            fileName: upload.name,
+            fileSize: upload.size,
+            contentType: upload.mimetype,
+          },
+        };
+      });
+
+      return files;
+    } catch (error) {
+      console.error("Error getting user uploads:", error);
+      throw error;
+    }
+  }
+
+  /**
    * Ottiene la lista dei file salvati
    */
   async getFileList() {
-    if (!this.authToken) {
-      throw new Error("Auth token is required. Please set it in settings.");
+    // Allow operation if we have authToken (admin) or userAddress (wallet user)
+    if (!this.authToken && !this.userAddress) {
+      throw new Error("Please connect your wallet or set auth token in settings.");
     }
 
     // Verifica connessione prima di procedere
@@ -1585,28 +1729,46 @@ export class DriveCore {
       );
     }
 
-    try {
-      // Ottieni lista pin
-      const controller1 = new AbortController();
-      const timeoutId1 = setTimeout(() => controller1.abort(), 10000);
-
-      // Usa l'SDK invece di fetch
-      let pinsResult;
+    // In wallet mode (no admin token), use user-specific uploads endpoint
+    // This matches the behavior of shogun-deals and ensures files are properly visible
+    if (!this.authToken && this.userAddress) {
+      console.log("📁 Wallet mode: fetching user-specific uploads");
       try {
-        pinsResult = await this.sdk.ipfs.pinLs();
-        clearTimeout(timeoutId1);
+        return await this.getUserUploads(this.userAddress);
       } catch (error) {
-        clearTimeout(timeoutId1);
-        if (error.response && error.response.status === 401) {
-          throw new Error(
-            "Authentication failed. Please check your auth token in settings."
-          );
+        console.error("Error fetching user uploads:", error);
+        throw new Error(`Failed to fetch your uploads: ${error.message}`);
+      }
+    }
+
+    // Admin mode: use existing pin listing logic
+    console.log("🔐 Admin mode: fetching all pins");
+
+    try {
+      // Ottieni lista pin (solo per admin mode)
+      let pinsResult = { success: true, pins: [] };
+      
+      // Skip pin/ls for wallet mode (use system-hashes-map instead)
+      if (this.authToken) {
+        const controller1 = new AbortController();
+        const timeoutId1 = setTimeout(() => controller1.abort(), 10000);
+
+        // Usa l'SDK per admin mode
+        try {
+          pinsResult = await this.sdk.ipfs.pinLs();
+          clearTimeout(timeoutId1);
+        } catch (error) {
+          clearTimeout(timeoutId1);
+          if (error.response && error.response.status === 401) {
+            throw new Error(
+              "Authentication failed. Please check your auth token in settings."
+            );
+          }
+          console.warn("⚠️ Could not get pins, using metadata only:", error.message);
+          // Don't throw, just use empty pins and rely on metadata
         }
-        throw new Error(
-          `Failed to get pins: ${error.response?.status || "unknown"} ${
-            error.message || "unknown error"
-          }`
-        );
+      } else {
+        console.log("📁 Wallet mode: using metadata-only file loading");
       }
 
       // Ottieni metadati sistema (opzionale, non blocca se fallisce)
@@ -1897,6 +2059,17 @@ export class DriveCore {
 
       console.log(`📋 Processed ${files.length} files`);
 
+      // In wallet mode (no authToken), filter files by userAddress - only show user's own files
+      if (!this.authToken && this.userAddress) {
+        const userFiles = files.filter(file => {
+          const fileUserAddress = file.metadata?.userAddress || "";
+          // Only show files belonging to THIS user (strict match)
+          return fileUserAddress.toLowerCase() === this.userAddress.toLowerCase();
+        });
+        console.log(`📁 Wallet mode: showing ${userFiles.length} files for user ${this.userAddress.slice(0, 8)}...`);
+        return userFiles;
+      }
+
       return files;
     } catch (error) {
       console.error("Error getting file list:", error);
@@ -1928,33 +2101,54 @@ export class DriveCore {
    * Elimina un file o directory (unpin + rimuove metadati)
    */
   async deleteFile(cid, metadata = {}) {
-    if (!this.authToken) {
-      throw new Error("Auth token is required. Please set it in settings.");
+    // Auth token or wallet signature required
+    if (!this.authToken && !this.walletSignature) {
+      throw new Error("Auth token or wallet connection is required.");
     }
 
     try {
-      // 1. Rimuovi il pin IPFS usando l'SDK
-      console.log(`🗑️ Removing IPFS pin for ${cid.substring(0, 12)}...`);
-      try {
-        await this.sdk.ipfs.pinRm(cid);
-        console.log(`✅ IPFS pin removed successfully`);
-      } catch (error) {
-        const errorText =
-          error.response?.data || error.message || "Unknown error";
-        throw new Error(
-          `Pin removal failed: ${
-            error.response?.status || "unknown"
-          } - ${JSON.stringify(errorText)}`
-        );
+      // 1. Rimuovi il pin IPFS (solo per admin mode)
+      if (this.authToken) {
+        console.log(`🗑️ Admin mode: Removing IPFS pin for ${cid.substring(0, 12)}...`);
+        try {
+          await this.sdk.ipfs.pinRm(cid);
+          console.log(`✅ IPFS pin removed successfully`);
+        } catch (error) {
+          const errorText =
+            error.response?.data || error.message || "Unknown error";
+          console.warn(`⚠️ Pin removal failed: ${error.response?.status || "unknown"} - ${JSON.stringify(errorText)}`);
+          // Don't throw in admin mode either, continue to remove metadata
+        }
+      } else {
+        console.log(`📁 Wallet mode: Removing file from user's view (metadata only)`);
       }
 
-      // 2. Rimuovi i metadati dal system hash map usando SDK
+      // 2. Rimuovi i metadati dal system hash map usando SDK o fetch
       try {
         console.log(`🗑️ Removing metadata from system hash map...`);
-        await this.sdk.uploads.removeSystemHash(
-          cid,
-          metadata.userAddress || "drive-user"
-        );
+        if (this.authToken) {
+          await this.sdk.uploads.removeSystemHash(
+            cid,
+            metadata.userAddress || this.userAddress || "drive-user"
+          );
+        } else if (this.walletSignature && this.userAddress) {
+          // Use direct fetch for wallet mode
+          const response = await fetch(`${this.relayUrl}/api/v1/uploads/remove-system-hash`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-User-Address": this.userAddress,
+              "X-Wallet-Signature": this.walletSignature,
+            },
+            body: JSON.stringify({
+              hash: cid,
+              userAddress: this.userAddress,
+            }),
+          });
+          if (!response.ok) {
+            console.warn(`⚠️ Metadata removal returned ${response.status}`);
+          }
+        }
         console.log(`✅ Metadata removed from system hash map`);
       } catch (metadataError) {
         console.warn(`⚠️ Error removing metadata:`, metadataError);
@@ -1986,6 +2180,51 @@ export class DriveCore {
       return true;
     } catch (error) {
       throw new Error(`Delete failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Ottiene informazioni sullo storage utilizzato e rimanente
+   * @returns Promise con informazioni sullo storage
+   */
+  async getStorageInfo() {
+    // Auth token or wallet signature required
+    if (!this.authToken && !this.walletSignature) {
+      throw new Error("Auth token or wallet connection is required. Please set it in settings or connect wallet.");
+    }
+
+    try {
+      // Usa SDK per ottenere informazioni sullo storage
+      const result = await this.sdk.x402.getStorageUsage(this.userAddress);
+
+      if (!result.success) {
+        throw new Error(result.error || "Failed to get storage information");
+      }
+
+      return {
+        success: true,
+        userAddress: result.userAddress,
+        storage: {
+          usedBytes: result.storage?.usedBytes || 0,
+          usedMB: result.storage?.usedMB || 0,
+          fileCount: result.storage?.fileCount || 0,
+          verified: result.storage?.verified || false,
+        },
+        subscription: result.subscription
+          ? {
+              tier: result.subscription.tier,
+              totalMB: result.subscription.totalMB || 0,
+              remainingMB: result.subscription.remainingMB || 0,
+              recordedUsedMB: result.subscription.recordedUsedMB || 0,
+              discrepancy: result.subscription.discrepancy || 0,
+              expiresAt: result.subscription.expiresAt,
+              active: true,
+            }
+          : null,
+      };
+    } catch (error) {
+      console.error("Error getting storage info:", error);
+      throw new Error(`Failed to get storage information: ${error.message}`);
     }
   }
 

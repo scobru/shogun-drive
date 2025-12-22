@@ -3,6 +3,9 @@ import { FileGrid } from "./FileGrid.js";
 import { UploadArea } from "./UploadArea.js";
 import { SettingsPanel } from "./SettingsPanel.js";
 
+// Ethers.js for wallet connection - using global from CDN (added to index.html)
+const ethers = window.ethers;
+
 export class DriveApp {
   constructor() {
     this.driveCore = new DriveCore({
@@ -18,17 +21,40 @@ export class DriveApp {
       localStorage.getItem("shogun-drive-relay-url") || window.location.origin;
     this.encryptionToken =
       localStorage.getItem("shogun-drive-encryption-token") || "";
+    
+    // Wallet connection state
+    this.walletConnected = false;
+    this.walletAddress = localStorage.getItem("shogun-drive-wallet-address") || null;
+    this.provider = null;
+    this.signer = null;
+    
+    // User address: prefer wallet address, fallback to manual setting
+    this.userAddress = this.walletAddress || 
+      localStorage.getItem("shogun-drive-user-address") || "";
+    
     this.isConnected = false;
     this.isAuthenticated = false;
     this.currentPath = []; // Array per tracciare il percorso di navigazione (stack di directory)
     this.currentDirectoryCid = null; // CID della directory corrente (null = root)
+    this.storageInfo = null; // Informazioni sullo storage
 
+    // Set relay URL first
+    this.driveCore.setRelayUrl(this.relayUrl);
+    
     if (this.authToken) {
       this.driveCore.setAuthToken(this.authToken);
-      this.driveCore.setRelayUrl(this.relayUrl);
     }
     if (this.encryptionToken) {
       this.driveCore.setEncryptionToken(this.encryptionToken);
+    }
+    if (this.userAddress) {
+      this.driveCore.setUserAddress(this.userAddress);
+    }
+    
+    // Load saved wallet signature
+    this.walletSignature = localStorage.getItem("shogun-drive-wallet-signature") || "";
+    if (this.walletSignature) {
+      this.driveCore.setWalletSignature(this.walletSignature);
     }
 
     // Initialize theme from localStorage
@@ -46,6 +72,7 @@ export class DriveApp {
 
     if (this.authToken && this.isConnected && this.isAuthenticated) {
       await this.loadFiles();
+      await this.loadStorageInfo();
     } else if (this.authToken) {
       this.showStatus(
         "Please check your connection and authentication settings",
@@ -55,7 +82,8 @@ export class DriveApp {
   }
 
   async checkConnection() {
-    if (!this.authToken) {
+    // With wallet auth, we don't need authToken - just userAddress
+    if (!this.userAddress && !this.authToken) {
       this.isConnected = false;
       this.isAuthenticated = false;
       this.updateConnectionStatus();
@@ -64,7 +92,8 @@ export class DriveApp {
 
     try {
       this.isConnected = await this.driveCore.checkRelayConnection();
-      this.isAuthenticated = await this.driveCore.checkAuthentication();
+      // With wallet auth, we're authenticated if we have a userAddress
+      this.isAuthenticated = this.walletConnected || await this.driveCore.checkAuthentication();
       this.updateConnectionStatus();
     } catch (error) {
       console.error("Connection check error:", error);
@@ -78,21 +107,188 @@ export class DriveApp {
     if (!this.container) return;
 
     const statusIndicator = this.container.querySelector("#connectionStatus");
+    const walletBtn = this.container.querySelector("#walletBtn");
+    const walletAddress = this.container.querySelector("#walletAddressDisplay");
+    
     if (statusIndicator) {
-      if (this.isConnected && this.isAuthenticated) {
+      if (this.walletConnected && this.isConnected) {
+        statusIndicator.className = "connection-status connected";
+        statusIndicator.textContent = "● Connected";
+        statusIndicator.title = `Connected as ${this.walletAddress}`;
+      } else if (this.isConnected && this.isAuthenticated) {
         statusIndicator.className = "connection-status connected";
         statusIndicator.textContent = "● Connected";
         statusIndicator.title = "Connected and authenticated";
       } else if (this.isConnected) {
         statusIndicator.className = "connection-status warning";
-        statusIndicator.textContent = "● Auth Failed";
-        statusIndicator.title = "Connected but authentication failed";
+        statusIndicator.textContent = "● No Wallet";
+        statusIndicator.title = "Connected but no wallet - connect wallet to use";
       } else {
         statusIndicator.className = "connection-status disconnected";
         statusIndicator.textContent = "● Disconnected";
         statusIndicator.title = "Cannot connect to relay server";
       }
     }
+    
+    // Update wallet button text
+    if (walletBtn) {
+      if (this.walletConnected && this.walletAddress) {
+        walletBtn.innerHTML = `
+          <svg xmlns="http://www.w3.org/2000/svg" class="icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+          </svg>
+          ${this.walletAddress.slice(0, 6)}...${this.walletAddress.slice(-4)}
+        `;
+        walletBtn.title = `Disconnect ${this.walletAddress}`;
+      } else {
+        walletBtn.innerHTML = `
+          <svg xmlns="http://www.w3.org/2000/svg" class="icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
+          </svg>
+          Connect Wallet
+        `;
+        walletBtn.title = "Connect wallet to use Drive";
+      }
+    }
+  }
+
+  async connectWallet() {
+    if (!window.ethereum) {
+      this.showStatus("MetaMask not detected. Please install MetaMask.", "error");
+      return;
+    }
+
+    try {
+      this.showStatus("Connecting wallet...", "info");
+      
+      // Request account access - ethers v6 uses BrowserProvider
+      this.provider = new ethers.BrowserProvider(window.ethereum);
+      const accounts = await this.provider.send("eth_requestAccounts", []);
+      
+      if (!accounts || accounts.length === 0) {
+        throw new Error("No accounts returned from wallet");
+      }
+      
+      this.walletAddress = accounts[0];
+      this.signer = await this.provider.getSigner();
+      this.walletConnected = true;
+      
+      // Update userAddress to wallet address
+      this.userAddress = this.walletAddress;
+      this.driveCore.setUserAddress(this.walletAddress);
+      
+      // Save to localStorage
+      localStorage.setItem("shogun-drive-wallet-address", this.walletAddress);
+      localStorage.setItem("shogun-drive-user-address", this.walletAddress);
+      
+      console.log(`Wallet connected: ${this.walletAddress}`);
+      this.showStatus("Signing authentication message...", "info");
+      
+      // Sign the authentication message
+      const message = "I Love Shogun";
+      try {
+        this.walletSignature = await this.signer.signMessage(message);
+        localStorage.setItem("shogun-drive-wallet-signature", this.walletSignature);
+        console.log("Wallet signature obtained");
+      } catch (signError) {
+        console.error("User rejected signature:", signError);
+        this.showStatus("Signature rejected - wallet connected but uploads disabled", "warning");
+        this.walletSignature = null;
+      }
+      
+      // Update DriveCore with signature
+      this.driveCore.setWalletSignature(this.walletSignature);
+      
+      this.showStatus(`Wallet connected: ${this.walletAddress.slice(0, 6)}...${this.walletAddress.slice(-4)}`, "success");
+      
+      // Re-render SettingsPanel with updated wallet status
+      this.updateSettingsPanel();
+      
+      // Update UI and load files
+      this.updateConnectionStatus();
+      await this.checkConnection();
+      
+      if (this.isConnected) {
+        await this.loadFiles();
+        await this.loadStorageInfo();
+      }
+      
+      // Listen for account changes
+      window.ethereum.on("accountsChanged", async (accounts) => {
+        if (accounts.length === 0) {
+          this.disconnectWallet();
+        } else if (accounts[0] !== this.walletAddress) {
+          this.walletAddress = accounts[0];
+          this.userAddress = accounts[0];
+          this.driveCore.setUserAddress(accounts[0]);
+          
+          // Re-sign message with new account
+          try {
+            const signer = await this.provider.getSigner();
+            this.walletSignature = await signer.signMessage("I Love Shogun");
+            localStorage.setItem("shogun-drive-wallet-signature", this.walletSignature);
+            this.driveCore.setWalletSignature(this.walletSignature);
+          } catch (signErr) {
+            this.walletSignature = null;
+            this.driveCore.setWalletSignature(null);
+          }
+          
+          localStorage.setItem("shogun-drive-wallet-address", accounts[0]);
+          localStorage.setItem("shogun-drive-user-address", accounts[0]);
+          this.updateConnectionStatus();
+          this.loadFiles();
+        }
+      });
+      
+    } catch (error) {
+      console.error("Wallet connection error:", error);
+      this.showStatus(`Failed to connect wallet: ${error.message}`, "error");
+      this.walletConnected = false;
+      this.walletAddress = null;
+    }
+  }
+
+  updateSettingsPanel() {
+    // Re-create settings panel with current state
+    const settingsPanelContainer = document.querySelector("#settingsPanelContainer");
+    if (settingsPanelContainer && this.settingsPanel) {
+      // Remove old panel
+      settingsPanelContainer.innerHTML = "";
+      
+      // Create new panel with updated wallet state
+      this.settingsPanel = new SettingsPanel({
+        authToken: this.authToken,
+        relayUrl: this.relayUrl,
+        encryptionToken: this.encryptionToken,
+        userAddress: this.userAddress,
+        walletConnected: this.walletConnected,
+        onSave: (settings) => this.handleSettingsSave(settings),
+      });
+      
+      settingsPanelContainer.appendChild(this.settingsPanel.render());
+    }
+  }
+
+  disconnectWallet() {
+    this.walletConnected = false;
+    this.walletAddress = null;
+    this.provider = null;
+    this.signer = null;
+    this.userAddress = "";
+    
+    // Clear from localStorage
+    localStorage.removeItem("shogun-drive-wallet-address");
+    localStorage.removeItem("shogun-drive-user-address");
+    
+    // Clear driveCore user
+    this.driveCore.setUserAddress("");
+    
+    // Clear files
+    this.files = [];
+    this.fileGrid?.updateFiles([]);
+    
+    this.showStatus("Wallet disconnected", "info");
+    this.updateConnectionStatus();
   }
 
   render() {
@@ -108,6 +304,12 @@ export class DriveApp {
         </div>
         <div class="header-right">
           <span id="connectionStatus" class="connection-status disconnected" title="Connection status">● Checking...</span>
+          <button id="walletBtn" class="btn-wallet" title="Connect wallet">
+            <svg xmlns="http://www.w3.org/2000/svg" class="icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
+            </svg>
+            Connect Wallet
+          </button>
           <button id="themeToggleBtn" class="btn-icon" title="Toggle Theme">
             <svg id="sunIcon" xmlns="http://www.w3.org/2000/svg" class="icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" style="display: none;">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
@@ -153,6 +355,7 @@ export class DriveApp {
           <div id="breadcrumb" class="breadcrumb" style="display: none;"></div>
         </div>
         <div class="toolbar-right">
+          <div id="storageInfo" class="storage-info" style="display: none;"></div>
           <div class="search-box">
             <svg xmlns="http://www.w3.org/2000/svg" class="search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -230,6 +433,8 @@ export class DriveApp {
       authToken: this.authToken,
       relayUrl: this.relayUrl,
       encryptionToken: this.encryptionToken,
+      userAddress: this.userAddress,
+      walletConnected: this.walletConnected,
       onSave: (settings) => this.handleSettingsSave(settings),
     });
 
@@ -267,6 +472,7 @@ export class DriveApp {
       .addEventListener("click", async () => {
         await this.checkConnection();
         await this.loadFiles();
+        await this.loadStorageInfo();
       });
 
     container.querySelector("#settingsBtn").addEventListener("click", () => {
@@ -281,6 +487,15 @@ export class DriveApp {
       this.fileGrid.filter(e.target.value);
     });
 
+    // Wallet button - connect or disconnect based on state
+    container.querySelector("#walletBtn").addEventListener("click", async () => {
+      if (this.walletConnected) {
+        this.disconnectWallet();
+      } else {
+        await this.connectWallet();
+      }
+    });
+
     this.container = container;
 
     // Update theme icons based on current theme
@@ -293,22 +508,23 @@ export class DriveApp {
   }
 
   async loadFiles() {
-    if (!this.authToken) {
+    // Allow loading files if we have a userAddress (from wallet) or authToken (admin)
+    if (!this.userAddress && !this.authToken) {
       this.showStatus(
-        "Please configure your auth token in settings",
+        "Please connect your wallet or configure auth token in settings",
         "warning"
       );
       return;
     }
 
     // Verifica connessione prima di caricare i file
-    if (!this.isConnected || !this.isAuthenticated) {
+    if (!this.isConnected) {
       this.showStatus(
-        "Not connected or authenticated. Please check your settings.",
+        "Not connected to relay. Please check your settings.",
         "warning"
       );
       await this.checkConnection();
-      if (!this.isConnected || !this.isAuthenticated) {
+      if (!this.isConnected) {
         return;
       }
     }
@@ -340,6 +556,78 @@ export class DriveApp {
       await this.checkConnection();
     } finally {
       this.isLoading = false;
+    }
+  }
+
+  async loadStorageInfo() {
+    // Allow if we have userAddress or authToken
+    if ((!this.userAddress && !this.authToken) || !this.isConnected) {
+      return;
+    }
+
+    try {
+      this.storageInfo = await this.driveCore.getStorageInfo();
+      this.updateStorageInfoDisplay();
+    } catch (error) {
+      console.warn("Could not load storage info:", error);
+      // Non mostrare errore all'utente, è un'informazione opzionale
+    }
+  }
+
+  updateStorageInfoDisplay() {
+    if (!this.container) return;
+
+    const storageInfoEl = this.container.querySelector("#storageInfo");
+    if (!storageInfoEl) return;
+
+    if (!this.storageInfo || !this.storageInfo.success) {
+      storageInfoEl.style.display = "none";
+      return;
+    }
+
+    const { storage, subscription } = this.storageInfo;
+
+    if (subscription && subscription.active) {
+      // Mostra informazioni con subscription
+      const usedMB = storage.usedMB || 0;
+      const totalMB = subscription.totalMB || 0;
+      const remainingMB = subscription.remainingMB || 0;
+      const percentUsed = totalMB > 0 ? (usedMB / totalMB) * 100 : 0;
+
+      storageInfoEl.innerHTML = `
+        <div class="storage-info-content">
+          <div class="storage-info-item">
+            <span class="storage-label">Spazio:</span>
+            <span class="storage-value">${usedMB.toFixed(2)} MB / ${totalMB.toFixed(2)} MB</span>
+          </div>
+          <div class="storage-info-item">
+            <span class="storage-label">Rimanente:</span>
+            <span class="storage-value ${remainingMB < 100 ? 'storage-warning' : ''}">${remainingMB.toFixed(2)} MB</span>
+          </div>
+          <div class="storage-progress">
+            <div class="storage-progress-bar" style="width: ${Math.min(percentUsed, 100)}%"></div>
+          </div>
+        </div>
+      `;
+      storageInfoEl.style.display = "flex";
+    } else {
+      // Mostra solo spazio utilizzato (senza subscription)
+      const usedMB = storage.usedMB || 0;
+      const fileCount = storage.fileCount || 0;
+
+      storageInfoEl.innerHTML = `
+        <div class="storage-info-content">
+          <div class="storage-info-item">
+            <span class="storage-label">Spazio utilizzato:</span>
+            <span class="storage-value">${usedMB.toFixed(2)} MB</span>
+          </div>
+          <div class="storage-info-item">
+            <span class="storage-label">File:</span>
+            <span class="storage-value">${fileCount}</span>
+          </div>
+        </div>
+      `;
+      storageInfoEl.style.display = "flex";
     }
   }
 
@@ -603,8 +891,9 @@ export class DriveApp {
   }
 
   async handleUpload(files, isFolder = false) {
-    if (!this.authToken) {
-      this.showStatus("Please configure your auth token in settings", "error");
+    // Require either auth token (admin) or wallet connection
+    if (!this.authToken && !this.walletConnected) {
+      this.showStatus("Please connect your wallet or configure auth token in settings", "error");
       this.toggleSettings();
       this.uploadArea.hide();
       return;
@@ -730,6 +1019,7 @@ export class DriveApp {
           try {
             await new Promise((resolve) => setTimeout(resolve, 1000));
             await this.loadFiles();
+            await this.loadStorageInfo();
           } catch (error) {
             console.error("Error reloading files:", error);
           }
@@ -760,8 +1050,9 @@ export class DriveApp {
   }
 
   async handleNewFolder() {
-    if (!this.authToken) {
-      this.showStatus("Please configure your auth token in settings", "error");
+    // Require either auth token (admin) or wallet connection
+    if (!this.authToken && !this.walletConnected) {
+      this.showStatus("Please connect your wallet or configure auth token in settings", "error");
       this.toggleSettings();
       return;
     }
@@ -1266,9 +1557,11 @@ export class DriveApp {
     this.authToken = settings.authToken;
     this.relayUrl = settings.relayUrl;
     this.encryptionToken = settings.encryptionToken || this.encryptionToken;
+    this.userAddress = settings.userAddress || "drive-user";
 
     localStorage.setItem("shogun-drive-token", this.authToken);
     localStorage.setItem("shogun-drive-relay-url", this.relayUrl);
+    localStorage.setItem("shogun-drive-user-address", this.userAddress);
     if (this.encryptionToken) {
       localStorage.setItem(
         "shogun-drive-encryption-token",
@@ -1280,6 +1573,7 @@ export class DriveApp {
 
     this.driveCore.setAuthToken(this.authToken);
     this.driveCore.setRelayUrl(this.relayUrl);
+    this.driveCore.setUserAddress(this.userAddress);
     if (this.encryptionToken) {
       this.driveCore.setEncryptionToken(this.encryptionToken);
     }
@@ -1291,6 +1585,7 @@ export class DriveApp {
 
     if (this.isConnected && this.isAuthenticated) {
       await this.loadFiles();
+      await this.loadStorageInfo();
     } else {
       this.showStatus(
         "Please check your connection and authentication",
