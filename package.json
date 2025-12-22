@@ -11,6 +11,7 @@
     "@tailwindcss/vite": "^4.1.17",
     "daisyui": "^5.5.5",
     "gun": "^0.2020.1241",
+    "shogun-relay-sdk": "^1.2.10",
     "tailwindcss": "^4.1.17",
     "vercel": "^48.10.10"
   },

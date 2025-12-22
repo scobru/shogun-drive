@@ -18,18 +18,8 @@
     <script src="https://cdn.jsdelivr.net/npm/gun/sea.js"></script>
 
     <!-- Tailwind Config -->
-    <script>
-        tailwind.config = {
-            darkMode: ["class", '[data-theme="dark"]'],
-            theme: {
-                extend: {
-                    fontFamily: {
-                        sans: ['Poppins', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'],
-                    },
-                }
-            }
-        }
-    </script>
+    <!-- Note: Tailwind configuration is now handled via vite.config.js and tailwind.config.js -->
+    <!-- The inline config has been removed since we're using the Vite plugin instead of CDN -->
     <script>
         // Ensure theme is applied immediately
         document.addEventListener('DOMContentLoaded', () => {

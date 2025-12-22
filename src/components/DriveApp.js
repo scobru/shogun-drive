@@ -25,7 +25,7 @@ export class DriveApp {
 
     if (this.authToken) {
       this.driveCore.setAuthToken(this.authToken);
-      this.driveCore.relayUrl = this.relayUrl;
+      this.driveCore.setRelayUrl(this.relayUrl);
     }
     if (this.encryptionToken) {
       this.driveCore.setEncryptionToken(this.encryptionToken);
@@ -144,6 +144,12 @@ export class DriveApp {
             </svg>
             Upload Folder
           </button>
+          <button id="newFolderBtn" class="btn-primary">
+            <svg xmlns="http://www.w3.org/2000/svg" class="icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+            </svg>
+            New Folder
+          </button>
           <div id="breadcrumb" class="breadcrumb" style="display: none;"></div>
         </div>
         <div class="toolbar-right">
@@ -252,6 +258,10 @@ export class DriveApp {
         }
       });
 
+    container.querySelector("#newFolderBtn").addEventListener("click", () => {
+      this.handleNewFolder();
+    });
+
     container
       .querySelector("#refreshBtn")
       .addEventListener("click", async () => {
@@ -337,28 +347,186 @@ export class DriveApp {
     try {
       console.log(`📂 Loading directory contents for CID: ${directoryCid}`);
 
-      // Prova a ottenere i contenuti della directory
-      const directoryData = await this.driveCore.getDirectoryContents(
-        directoryCid
-      );
-
-      console.log("📂 Directory data received:", directoryData);
-
-      // Converti i dati della directory in formato file
-      const files = [];
-
-      // Se directoryData ha una struttura con Links o altri metadati
-      if (directoryData.Links && Array.isArray(directoryData.Links)) {
-        console.log(
-          `📂 Found ${directoryData.Links.length} items in directory`
+      // Prima, prova a ottenere i metadati dalla cache locale
+      // I metadati contengono la lista dei file caricati nella directory
+      let metadata = null;
+      try {
+        // Prova dalla cache locale (questa è la fonte più affidabile perché contiene tutti i campi)
+        const cachedMetadata = localStorage.getItem(
+          "shogun-drive-metadata-cache"
         );
+        if (cachedMetadata) {
+          const parsed = JSON.parse(cachedMetadata);
+          metadata = parsed.data?.[directoryCid];
+          if (metadata) {
+            console.log(
+              `📂 Found metadata in cache for ${directoryCid}:`,
+              metadata
+            );
 
-        for (const link of directoryData.Links) {
-          const fileCid = link.Hash || link.hash;
-          const fileName = link.Name || link.name || fileCid;
+            // Gestisci il caso in cui files potrebbe essere una stringa JSON (da GunDB)
+            if (metadata.files) {
+              if (typeof metadata.files === "string") {
+                try {
+                  metadata.files = JSON.parse(metadata.files);
+                  console.log(`📂 Parsed files from JSON string`);
+                } catch (e) {
+                  console.warn(`⚠️ Failed to parse files JSON string:`, e);
+                  metadata.files = [];
+                }
+              }
 
-          // Determina il tipo MIME in base all'estensione del file
-          const ext = fileName.split(".").pop()?.toLowerCase() || "";
+              if (Array.isArray(metadata.files)) {
+                console.log(
+                  `📂 Cache has ${metadata.files.length} files in metadata`
+                );
+              } else {
+                console.warn(
+                  `⚠️ Files is not an array:`,
+                  typeof metadata.files
+                );
+                metadata.files = [];
+              }
+            } else {
+              console.warn(`⚠️ Cache metadata exists but no files field found`);
+              console.warn(`⚠️ Metadata keys:`, Object.keys(metadata));
+            }
+          } else {
+            console.log(`📂 No metadata in cache for ${directoryCid}`);
+            console.log(
+              `📂 Available CIDs in cache:`,
+              Object.keys(parsed.data || {})
+            );
+          }
+        } else {
+          console.log(`📂 No cached metadata found at all`);
+        }
+
+        // Se non in cache o non ha files, prova a recuperare dal server
+        // Nota: il server potrebbe non restituire il campo files, quindi usiamo la cache come priorità
+        if (
+          !metadata ||
+          !metadata.files ||
+          !Array.isArray(metadata.files) ||
+          metadata.files.length === 0
+        ) {
+          console.log(
+            `📂 Metadata not in cache or incomplete, fetching from server...`
+          );
+          try {
+            const response = await fetch(
+              `${this.relayUrl}/api/v1/user-uploads/system-hashes-map`,
+              {
+                method: "GET",
+                headers: {
+                  Authorization: this.authToken
+                    ? `Bearer ${this.authToken}`
+                    : undefined,
+                },
+              }
+            );
+
+            if (response.ok) {
+              const data = await response.json();
+              const systemHashes = data.systemHashes || {};
+              const serverMetadata = systemHashes[directoryCid];
+
+              if (serverMetadata) {
+                console.log(`📂 Found metadata from server`);
+                console.log(
+                  `📂 Server metadata keys:`,
+                  Object.keys(serverMetadata)
+                );
+
+                // Gestisci il caso in cui files potrebbe essere una stringa JSON (da GunDB)
+                if (serverMetadata.files) {
+                  if (typeof serverMetadata.files === "string") {
+                    try {
+                      serverMetadata.files = JSON.parse(serverMetadata.files);
+                      console.log(`📂 Parsed files from JSON string`);
+                    } catch (e) {
+                      console.warn(`⚠️ Failed to parse files JSON string:`, e);
+                      serverMetadata.files = [];
+                    }
+                  }
+
+                  if (Array.isArray(serverMetadata.files)) {
+                    console.log(
+                      `📂 Server metadata includes ${serverMetadata.files.length} files`
+                    );
+                  } else {
+                    console.warn(
+                      `⚠️ Server files is not an array:`,
+                      typeof serverMetadata.files
+                    );
+                    serverMetadata.files = [];
+                  }
+                }
+
+                // Usa i metadati dal server (ora include anche il campo 'files')
+                metadata = serverMetadata;
+
+                // Aggiorna la cache con i metadati dal server
+                try {
+                  const cacheData = cachedMetadata
+                    ? JSON.parse(cachedMetadata)
+                    : { data: {}, timestamp: Date.now() };
+                  cacheData.data[directoryCid] = metadata;
+                  cacheData.timestamp = Date.now();
+                  localStorage.setItem(
+                    "shogun-drive-metadata-cache",
+                    JSON.stringify(cacheData)
+                  );
+                  console.log(`📂 Updated cache with server metadata`);
+                } catch (e) {
+                  console.warn("⚠️ Error updating cache:", e);
+                }
+              }
+            }
+          } catch (e) {
+            console.warn("⚠️ Error fetching metadata from server:", e);
+          }
+        }
+      } catch (e) {
+        console.warn("⚠️ Error reading metadata:", e);
+      }
+
+      // Se abbiamo i metadati con la lista dei file, usiamoli
+      if (
+        metadata &&
+        metadata.files &&
+        Array.isArray(metadata.files) &&
+        metadata.files.length > 0
+      ) {
+        console.log(`📂 Using metadata to build file list`);
+        const files = metadata.files.map((fileInfo) => {
+          // Il path salvato nei metadati è il webkitRelativePath che include
+          // il nome della directory (es. "Immagini di Bing/file.jpg")
+          // Quando usiamo catFromDirectory, il directoryCid è già la directory radice,
+          // quindi dobbiamo usare il path esatto come salvato in IPFS
+          // IPFS con wrap-with-directory=true crea una struttura dove i file
+          // sono nella root della directory, quindi il path dovrebbe essere
+          // relativo alla directory radice
+          let filePath = fileInfo.path || fileInfo.name;
+
+          // Se il path inizia con il nome della directory (displayName), rimuovilo
+          // perché il directoryCid è già la directory radice
+          const directoryName = metadata.displayName || metadata.fileName;
+          if (directoryName && filePath.startsWith(directoryName + "/")) {
+            filePath = filePath.substring(directoryName.length + 1);
+            console.log(
+              `📂 Removed directory name from path: ${fileInfo.path} -> ${filePath}`
+            );
+          }
+
+          const fullPath = `${directoryCid}/${filePath}`;
+
+          // Determina il tipo MIME
+          const ext =
+            (fileInfo.name || fileInfo.path || "")
+              .split(".")
+              .pop()
+              ?.toLowerCase() || "";
           const mimeTypes = {
             png: "image/png",
             jpg: "image/jpeg",
@@ -376,33 +544,60 @@ export class DriveApp {
             html: "text/html",
             css: "text/css",
             js: "application/javascript",
-            enc: "text/plain", // File criptato
+            enc: "text/plain",
           };
-          const contentType = mimeTypes[ext] || "application/octet-stream";
+          const contentType =
+            mimeTypes[ext] || fileInfo.mimetype || "application/octet-stream";
 
-          files.push({
-            cid: fileCid,
-            name: fileName,
-            originalName: fileName,
-            size: link.Size || link.size || 0,
+          return {
+            cid: fullPath, // Usa il percorso completo per catFromDirectory
+            name: fileInfo.name || fileInfo.path,
+            originalName: fileInfo.name || fileInfo.path,
+            size: fileInfo.size || 0,
             type: contentType,
-            isEncrypted: fileName.endsWith(".enc"),
-            uploadedAt: Date.now(),
-            relayUrl: `${this.relayUrl}/api/v1/ipfs/cat/${fileCid}`,
-            isDirectory: link.Type === 1 || link.type === 1, // Type 1 = directory in IPFS
+            // Usa isEncrypted dai metadati se disponibile, altrimenti controlla l'estensione
+            isEncrypted:
+              fileInfo.isEncrypted !== undefined
+                ? fileInfo.isEncrypted
+                : (fileInfo.name || fileInfo.path || "").endsWith(".enc"),
+            uploadedAt: metadata.uploadedAt || Date.now(),
+            // Non costruire relayUrl per file dentro directory - useremo catFromDirectory
+            relayUrl: null,
+            isDirectory: false,
             parentDirectory: directoryCid,
-            relativePath: fileName,
-          });
-        }
-      } else {
-        console.warn("📂 No Links found in directory data:", directoryData);
+            relativePath: filePath,
+          };
+        });
+
+        console.log(`📂 Processed ${files.length} files from metadata`);
+        return files;
       }
 
-      console.log(`📂 Processed ${files.length} files from directory`);
-      return files;
+      // Se non abbiamo i metadati, non possiamo mostrare i file
+      // (l'API IPFS ls non è disponibile tramite il relay)
+      if (
+        !metadata ||
+        !metadata.files ||
+        !Array.isArray(metadata.files) ||
+        metadata.files.length === 0
+      ) {
+        console.warn(
+          `⚠️ No metadata or files found for directory ${directoryCid}`
+        );
+        console.warn(
+          `⚠️ This might happen if the directory was uploaded before metadata tracking was added`
+        );
+        console.warn(
+          `⚠️ Try re-uploading the directory to ensure metadata is saved`
+        );
+        this.showStatus(
+          "Directory metadata not found. Please re-upload the directory to see its contents.",
+          "warning"
+        );
+        return [];
+      }
     } catch (error) {
       console.error("❌ Error loading directory contents:", error);
-      // Se non riesce a caricare i contenuti, mostra un errore
       throw new Error(`Failed to load directory contents: ${error.message}`);
     }
   }
@@ -416,6 +611,9 @@ export class DriveApp {
     }
 
     try {
+      // Verifica se siamo dentro una directory
+      const isInDirectory = this.currentDirectoryCid !== null;
+
       if (isFolder || (files.length > 0 && files[0].webkitRelativePath)) {
         // Upload come directory
         const folderName =
@@ -425,7 +623,7 @@ export class DriveApp {
           "info"
         );
 
-        const result = await this.driveCore.uploadDirectory(files, {
+        await this.driveCore.uploadDirectory(files, {
           encrypt: true,
           folderName: folderName,
         });
@@ -438,8 +636,76 @@ export class DriveApp {
         // Ricarica i file
         await new Promise((resolve) => setTimeout(resolve, 1000));
         await this.loadFiles();
+      } else if (isInDirectory) {
+        // Siamo dentro una directory: aggiungi i file alla directory esistente
+        this.showStatus(
+          `Adding ${files.length} file(s) to current folder...`,
+          "info"
+        );
+
+        try {
+          // Ottieni i metadati della directory corrente
+          let existingFilesMetadata = [];
+          try {
+            const cachedMetadata = localStorage.getItem(
+              "shogun-drive-metadata-cache"
+            );
+            if (cachedMetadata) {
+              const parsed = JSON.parse(cachedMetadata);
+              const dirMetadata = parsed.data?.[this.currentDirectoryCid];
+              if (dirMetadata?.files && Array.isArray(dirMetadata.files)) {
+                existingFilesMetadata = dirMetadata.files;
+              }
+            }
+          } catch (e) {
+            console.warn("⚠️ Could not get existing files metadata:", e);
+          }
+
+          // Aggiungi i file alla directory esistente
+          const oldDirectoryCid = this.currentDirectoryCid;
+          const result = await this.driveCore.addFilesToDirectory(
+            this.currentDirectoryCid,
+            files,
+            existingFilesMetadata
+          );
+
+          // Aggiorna il currentDirectoryCid con il nuovo CID della directory aggiornata
+          if (
+            result.success &&
+            result.directoryCid &&
+            result.directoryCid !== oldDirectoryCid
+          ) {
+            console.log(
+              `🔄 Updating current directory CID from ${oldDirectoryCid.substring(
+                0,
+                12
+              )}... to ${result.directoryCid.substring(0, 12)}...`
+            );
+            this.currentDirectoryCid = result.directoryCid;
+            // Aggiorna anche il breadcrumb se necessario
+            if (this.currentPath.length > 0) {
+              this.currentPath[this.currentPath.length - 1].cid =
+                result.directoryCid;
+            }
+          }
+
+          this.showStatus(
+            `Successfully added ${files.length} file(s) to folder`,
+            "success"
+          );
+
+          // Ricarica i file con il nuovo CID
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          await this.loadFiles();
+        } catch (error) {
+          this.showStatus(
+            `Error adding files to folder: ${error.message}`,
+            "error"
+          );
+          console.error("Error adding files to directory:", error);
+        }
       } else {
-        // Upload file singoli
+        // Upload file singoli nella root
         let successCount = 0;
         let errorCount = 0;
 
@@ -493,6 +759,38 @@ export class DriveApp {
     }
   }
 
+  async handleNewFolder() {
+    if (!this.authToken) {
+      this.showStatus("Please configure your auth token in settings", "error");
+      this.toggleSettings();
+      return;
+    }
+
+    // Chiedi il nome della cartella
+    const folderName = prompt("Enter folder name:");
+    if (!folderName || folderName.trim() === "") {
+      return; // L'utente ha annullato o non ha inserito un nome
+    }
+
+    const trimmedFolderName = folderName.trim();
+
+    try {
+      this.showStatus(`Creating folder "${trimmedFolderName}"...`, "info");
+      await this.driveCore.createEmptyDirectory(trimmedFolderName);
+      this.showStatus(
+        `Folder "${trimmedFolderName}" created successfully`,
+        "success"
+      );
+
+      // Ricarica i file
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await this.loadFiles();
+    } catch (error) {
+      this.showStatus(`Error creating folder: ${error.message}`, "error");
+      console.error("Error creating folder:", error);
+    }
+  }
+
   async handleFileDownload(file) {
     try {
       this.showStatus(`Downloading ${file.name}...`, "info");
@@ -538,28 +836,103 @@ export class DriveApp {
   }
 
   async handleFileDelete(file) {
-    if (!confirm(`Are you sure you want to delete "${file.name}"?`)) {
+    const itemType = file.isDirectory ? "folder" : "file";
+    if (
+      !confirm(
+        `Are you sure you want to delete this ${itemType} "${file.name}"?`
+      )
+    ) {
       return;
     }
 
     try {
       this.showStatus(`Deleting ${file.name}...`, "info");
-      await this.driveCore.deleteFile(file.cid);
-      this.showStatus(`${file.name} deleted successfully`, "success");
-      // Aspetta un po' prima di ricaricare per dare tempo al relay di aggiornare
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      await this.loadFiles();
+
+      // Se il file è dentro una directory, usa removeFileFromDirectory
+      if (file.parentDirectory && file.relativePath) {
+        // Ottieni i metadati della directory corrente
+        let existingFilesMetadata = [];
+        try {
+          const cachedMetadata = localStorage.getItem(
+            "shogun-drive-metadata-cache"
+          );
+          if (cachedMetadata) {
+            const parsed = JSON.parse(cachedMetadata);
+            const dirMetadata = parsed.data?.[file.parentDirectory];
+            if (dirMetadata?.files && Array.isArray(dirMetadata.files)) {
+              existingFilesMetadata = dirMetadata.files;
+            }
+          }
+        } catch (e) {
+          console.warn("⚠️ Could not get existing files metadata:", e);
+        }
+
+        // Rimuovi il file dalla directory
+        const oldDirectoryCid = file.parentDirectory;
+        const result = await this.driveCore.removeFileFromDirectory(
+          oldDirectoryCid,
+          file.relativePath,
+          existingFilesMetadata
+        );
+
+        // Aggiorna il currentDirectoryCid se siamo dentro quella directory
+        if (
+          result.success &&
+          result.directoryCid &&
+          result.directoryCid !== oldDirectoryCid
+        ) {
+          if (this.currentDirectoryCid === oldDirectoryCid) {
+            this.currentDirectoryCid = result.directoryCid;
+            // Aggiorna anche il breadcrumb se necessario
+            if (this.currentPath.length > 0) {
+              this.currentPath[this.currentPath.length - 1].cid =
+                result.directoryCid;
+            }
+          }
+        }
+
+        this.showStatus(`${file.name} deleted successfully`, "success");
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await this.loadFiles();
+      } else {
+        // File normale nella root: elimina normalmente
+        await this.driveCore.deleteFile(file.cid, file.metadata || {});
+        this.showStatus(`${file.name} deleted successfully`, "success");
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await this.loadFiles();
+      }
     } catch (error) {
       this.showStatus(`Error deleting ${file.name}: ${error.message}`, "error");
+      console.error("Delete error:", error);
     }
   }
 
   async handleFolderClick(folder) {
     // Naviga dentro la cartella
-    this.currentPath.push({
-      cid: this.currentDirectoryCid,
-      name: this.currentDirectoryCid ? "Folder" : "Root",
-    });
+    // Aggiungi solo se non siamo già nella root (evita di aggiungere "Root" al path)
+    if (this.currentDirectoryCid) {
+      // Ottieni il nome della directory corrente dai metadati
+      let dirName = folder.name || "Folder";
+      try {
+        const cachedMetadata = localStorage.getItem(
+          "shogun-drive-metadata-cache"
+        );
+        if (cachedMetadata) {
+          const parsed = JSON.parse(cachedMetadata);
+          const dirMetadata = parsed.data?.[this.currentDirectoryCid];
+          if (dirMetadata?.displayName || dirMetadata?.fileName) {
+            dirName = dirMetadata.displayName || dirMetadata.fileName;
+          }
+        }
+      } catch (e) {
+        // Usa folder.name come fallback
+      }
+
+      this.currentPath.push({
+        cid: this.currentDirectoryCid,
+        name: dirName,
+      });
+    }
     this.currentDirectoryCid = folder.cid;
     this.updateBreadcrumb();
     await this.loadFiles();
@@ -591,6 +964,26 @@ export class DriveApp {
     }
 
     breadcrumbEl.style.display = "flex";
+
+    // Ottieni il nome della directory corrente se disponibile
+    let currentDirName = null;
+    if (this.currentDirectoryCid) {
+      try {
+        const cachedMetadata = localStorage.getItem(
+          "shogun-drive-metadata-cache"
+        );
+        if (cachedMetadata) {
+          const parsed = JSON.parse(cachedMetadata);
+          const dirMetadata = parsed.data?.[this.currentDirectoryCid];
+          if (dirMetadata?.displayName || dirMetadata?.fileName) {
+            currentDirName = dirMetadata.displayName || dirMetadata.fileName;
+          }
+        }
+      } catch (e) {
+        // Ignora errori
+      }
+    }
+
     breadcrumbEl.innerHTML = `
       <button class="breadcrumb-item" data-path="-1">🏠 Root</button>
       ${this.currentPath
@@ -605,10 +998,9 @@ export class DriveApp {
         this.currentDirectoryCid
           ? `
         <span class="breadcrumb-separator">/</span>
-        <span class="breadcrumb-current">${this.currentDirectoryCid.substring(
-          0,
-          12
-        )}...</span>
+        <span class="breadcrumb-current">${
+          currentDirName || this.currentDirectoryCid.substring(0, 12) + "..."
+        }</span>
       `
           : ""
       }
@@ -623,10 +1015,214 @@ export class DriveApp {
     });
   }
 
-  handleFileClick(file) {
+  async handleFileClick(file) {
     // Se è una directory, apri la directory
     if (file.isDirectory || file.type === "application/x-directory") {
       this.handleFolderClick(file);
+      return;
+    }
+
+    // Se il file è dentro una directory, usa catFromDirectory per ottenere il blob
+    if (file.parentDirectory && file.relativePath) {
+      try {
+        console.log(`📂 Loading file from directory:`, {
+          parentDirectory: file.parentDirectory,
+          relativePath: file.relativePath,
+          fileName: file.name,
+          isEncrypted: file.isEncrypted,
+        });
+
+        this.showStatus(`Loading ${file.name}...`, "info");
+        let blob = await this.driveCore.catFromDirectory(
+          file.parentDirectory,
+          file.relativePath
+        );
+
+        console.log(`📂 File blob retrieved:`, {
+          size: blob.size,
+          type: blob.type,
+          isEncrypted: file.isEncrypted,
+        });
+
+        // Se il file è criptato, decriptalo
+        // Controlla se il blob è già un tipo immagine/video/audio valido (già decriptato)
+        const isAlreadyDecrypted =
+          blob.type &&
+          (blob.type.startsWith("image/") ||
+            blob.type.startsWith("video/") ||
+            blob.type.startsWith("audio/"));
+
+        if (
+          file.isEncrypted &&
+          !isAlreadyDecrypted &&
+          (this.encryptionToken || this.authToken)
+        ) {
+          try {
+            this.showStatus(`Decrypting ${file.name}...`, "info");
+            blob = await this.driveCore.decryptBlob(
+              blob,
+              this.encryptionToken || this.authToken
+            );
+            console.log(`📂 File decrypted successfully:`, {
+              size: blob.size,
+              type: blob.type,
+            });
+          } catch (decryptError) {
+            console.error("Decryption error:", decryptError);
+            this.showStatus(
+              `Error decrypting ${file.name}: ${decryptError.message}`,
+              "error"
+            );
+            return;
+          }
+        }
+
+        // Crea un blob con il tipo corretto
+        // Usa il tipo del file se disponibile, altrimenti usa il tipo del blob
+        // Dopo la decrittazione, il tipo potrebbe non essere impostato, quindi usiamo file.type
+        const blobType = file.type || blob.type || "application/octet-stream";
+        const typedBlob =
+          blob.type !== blobType ? new Blob([blob], { type: blobType }) : blob;
+
+        // Estrai il nome del file dal path se disponibile
+        const fileName =
+          file.originalName ||
+          file.name ||
+          file.relativePath?.split("/").pop() ||
+          "file";
+
+        if (
+          blobType.startsWith("image/") ||
+          blobType.startsWith("video/") ||
+          blobType.startsWith("audio/")
+        ) {
+          // Converti il blob in data URL (base64) per renderlo accessibile nella nuova finestra
+          this.showStatus(`Preparing ${file.name} for display...`, "info");
+          const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(typedBlob);
+          });
+
+          // Per immagini, video e audio, crea una pagina HTML che mostra il contenuto
+          // Usa data URL invece di blob URL per renderlo accessibile nella nuova finestra
+          const htmlContent = blobType.startsWith("image/")
+            ? `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>${fileName}</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+    img {
+      max-width: 100%;
+      max-height: 100vh;
+      object-fit: contain;
+    }
+  </style>
+</head>
+<body>
+  <img src="${dataUrl}" alt="${fileName}" />
+</body>
+</html>`
+            : blobType.startsWith("video/")
+            ? `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>${fileName}</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+    video {
+      max-width: 100%;
+      max-height: 100vh;
+    }
+  </style>
+</head>
+<body>
+  <video src="${dataUrl}" controls autoplay></video>
+</body>
+</html>`
+            : `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>${fileName}</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+    audio {
+      width: 100%;
+      max-width: 600px;
+    }
+  </style>
+</head>
+<body>
+  <audio src="${dataUrl}" controls autoplay></audio>
+</body>
+</html>`;
+
+          const htmlBlob = new Blob([htmlContent], { type: "text/html" });
+          const htmlUrl = URL.createObjectURL(htmlBlob);
+          const newWindow = window.open(htmlUrl, "_blank", "noopener");
+          if (newWindow) {
+            // Revoca l'URL HTML dopo che la finestra è stata aperta
+            setTimeout(() => {
+              URL.revokeObjectURL(htmlUrl);
+            }, 100);
+          }
+        } else {
+          // Per altri tipi di file, scarica con il nome corretto
+          const url = URL.createObjectURL(typedBlob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = fileName;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTimeout(() => {
+            URL.revokeObjectURL(url);
+          }, 100);
+        }
+
+        this.showStatus(`${file.name} loaded successfully`, "success");
+      } catch (error) {
+        this.showStatus(
+          `Error loading ${file.name}: ${error.message}`,
+          "error"
+        );
+        console.error("Error loading file from directory:", error);
+      }
+      return;
+    }
+
+    // Per file normali (non in directory), usa relayUrl
+    if (!file.relayUrl) {
+      this.showStatus(`No URL available for ${file.name}`, "error");
       return;
     }
 
@@ -683,7 +1279,7 @@ export class DriveApp {
     }
 
     this.driveCore.setAuthToken(this.authToken);
-    this.driveCore.relayUrl = this.relayUrl;
+    this.driveCore.setRelayUrl(this.relayUrl);
     if (this.encryptionToken) {
       this.driveCore.setEncryptionToken(this.encryptionToken);
     }

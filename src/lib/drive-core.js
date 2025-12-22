@@ -3,6 +3,8 @@
  * Gestisce upload, download, criptazione e decrittazione file su IPFS
  */
 
+import ShogunRelaySDK from "shogun-relay-sdk";
+
 export class DriveCore {
   constructor(options = {}) {
     this.relayUrl = options.relayUrl || window.location.origin;
@@ -10,10 +12,28 @@ export class DriveCore {
     this.encryptionToken = options.encryptionToken || null;
     this.onProgress = options.onProgress || (() => {});
     this.onStatusChange = options.onStatusChange || (() => {});
+
+    // Inizializza SDK del relay
+    this.sdk = new ShogunRelaySDK({
+      baseURL: this.relayUrl,
+      token: this.authToken,
+    });
   }
 
   setAuthToken(token) {
     this.authToken = token;
+    if (this.sdk) {
+      this.sdk.setToken(token);
+    }
+  }
+
+  setRelayUrl(relayUrl) {
+    this.relayUrl = relayUrl;
+    // Ricrea l'SDK con il nuovo URL
+    this.sdk = new ShogunRelaySDK({
+      baseURL: this.relayUrl,
+      token: this.authToken,
+    });
   }
 
   setEncryptionToken(token) {
@@ -136,18 +156,16 @@ export class DriveCore {
    */
   async checkRelayConnection() {
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      // Usa SDK per health check con timeout
+      const healthPromise = this.sdk.system.health();
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Timeout")), 5000)
+      );
 
-      const response = await fetch(`${this.relayUrl}/health`, {
-        method: "GET",
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-      return response.ok;
+      await Promise.race([healthPromise, timeoutPromise]);
+      return true;
     } catch (error) {
-      if (error.name === "AbortError") {
+      if (error.message === "Timeout") {
         console.error("Relay connection check timeout");
       } else {
         console.error("Relay connection check failed:", error);
@@ -168,18 +186,18 @@ export class DriveCore {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5000);
 
-      // Prova a fare una richiesta semplice per verificare l'auth
-      const response = await fetch(`${this.relayUrl}/api/v1/ipfs/pin/ls`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${this.authToken}`,
-        },
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-      // Solo 200-299 sono considerati successi
-      return response.ok;
+      // Prova a fare una richiesta semplice per verificare l'auth usando l'SDK
+      try {
+        await this.sdk.ipfs.pinLs();
+        clearTimeout(timeoutId);
+        return true;
+      } catch (error) {
+        clearTimeout(timeoutId);
+        if (error.response && error.response.status === 401) {
+          return false;
+        }
+        throw error;
+      }
     } catch (error) {
       if (error.name === "AbortError") {
         console.error("Authentication check timeout");
@@ -282,38 +300,31 @@ export class DriveCore {
       message: "Uploading directory to IPFS...",
     });
 
-    const formData = new FormData();
-
-    // Aggiungi tutti i file al FormData mantenendo la struttura della directory
-    fileEntries.forEach((fileEntry) => {
-      // Convert ArrayBuffer to Uint8Array for Blob constructor (browser-compatible)
+    // Converti i fileEntries in File objects per l'SDK
+    const fileObjects = fileEntries.map((fileEntry) => {
       const uint8Array = new Uint8Array(fileEntry.buffer);
       const blob = new Blob([uint8Array], {
-        type: fileEntry.contentType,
+        type: fileEntry.contentType || "application/octet-stream",
       });
-      formData.append("files", blob, fileEntry.path);
+      // Crea un File object con il path corretto
+      const file = new File(
+        [blob],
+        fileEntry.path.split("/").pop() || fileEntry.path,
+        {
+          type: fileEntry.contentType || "application/octet-stream",
+        }
+      );
+      // Imposta webkitRelativePath per mantenere la struttura directory
+      Object.defineProperty(file, "webkitRelativePath", {
+        value: fileEntry.path,
+        writable: false,
+      });
+      return file;
     });
 
     try {
-      const response = await fetch(
-        `${this.relayUrl}/api/v1/ipfs/upload-directory`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${this.authToken}`,
-          },
-          body: formData,
-        }
-      );
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(
-          errorData.error || `Directory upload failed: ${response.status}`
-        );
-      }
-
-      const result = await response.json();
+      // Usa SDK per upload directory
+      const result = await this.sdk.ipfs.uploadDirectoryBrowser(fileObjects);
 
       if (!result.success || !result.directoryCid) {
         throw new Error(
@@ -345,6 +356,9 @@ export class DriveCore {
         files: fileEntries.map((f) => ({
           path: f.path,
           name: f.originalName,
+          originalName: f.originalName,
+          size: f.buffer.byteLength || 0,
+          mimetype: f.contentType,
           isEncrypted: f.isEncrypted,
         })),
         relayUrl: `${this.relayUrl}/api/v1/ipfs/cat/${directoryCid}`,
@@ -357,6 +371,113 @@ export class DriveCore {
       this.onStatusChange({
         status: "completed",
         message: "Directory uploaded successfully",
+        hash: directoryCid,
+      });
+
+      return {
+        success: true,
+        directoryCid: directoryCid,
+        metadata,
+      };
+    } catch (error) {
+      this.onStatusChange({
+        status: "error",
+        message: error.message,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Crea una directory vuota su IPFS
+   * @param folderName Il nome della directory da creare
+   * @returns Promise con il CID della directory creata
+   */
+  async createEmptyDirectory(folderName) {
+    if (!this.authToken) {
+      throw new Error("Auth token is required. Please set it in settings.");
+    }
+
+    // Verifica connessione al relay
+    this.onStatusChange({
+      status: "checking",
+      message: "Checking relay connection...",
+    });
+    const isConnected = await this.checkRelayConnection();
+    if (!isConnected) {
+      throw new Error(
+        "Cannot connect to relay server. Please check the relay URL in settings."
+      );
+    }
+
+    // Verifica autenticazione
+    this.onStatusChange({
+      status: "checking",
+      message: "Verifying authentication...",
+    });
+    const isAuthenticated = await this.checkAuthentication();
+    if (!isAuthenticated) {
+      throw new Error(
+        "Authentication failed. Please check your auth token in settings."
+      );
+    }
+
+    this.onStatusChange({
+      status: "preparing",
+      message: `Creating empty folder "${folderName}"...`,
+    });
+
+    // Crea un file placeholder vuoto con il nome della directory
+    // IPFS richiede almeno un file per creare una directory
+    const placeholderBlob = new Blob([], { type: "application/x-empty" });
+    const placeholderFile = new File([placeholderBlob], ".keep", {
+      type: "application/x-empty",
+    });
+    // Imposta webkitRelativePath per mantenere la struttura directory
+    Object.defineProperty(placeholderFile, "webkitRelativePath", {
+      value: `${folderName}/.keep`,
+      writable: false,
+    });
+
+    try {
+      // Usa SDK per creare directory vuota
+      const result = await this.sdk.ipfs.uploadDirectoryBrowser([
+        placeholderFile,
+      ]);
+
+      if (!result.success || !result.directoryCid) {
+        throw new Error(
+          result.error || "Directory creation failed - invalid response"
+        );
+      }
+
+      const directoryCid = result.directoryCid;
+
+      // Salva metadati della directory vuota nel sistema
+      const now = Date.now();
+      const metadata = {
+        hash: directoryCid,
+        userAddress: "drive-user",
+        timestamp: now,
+        fileName: folderName,
+        displayName: folderName,
+        originalName: folderName,
+        fileSize: 0,
+        isEncrypted: false,
+        isDirectory: true,
+        contentType: "application/x-directory",
+        fileCount: 0, // Directory vuota
+        files: [], // Nessun file
+        relayUrl: `${this.relayUrl}/api/v1/ipfs/cat/${directoryCid}`,
+        uploadedAt: now,
+      };
+
+      console.log("💾 Saving empty directory metadata:", metadata);
+      await this.saveFileMetadata(metadata);
+
+      this.onStatusChange({
+        status: "completed",
+        message: "Empty directory created successfully",
         hash: directoryCid,
       });
 
@@ -441,24 +562,25 @@ export class DriveCore {
       message: "Uploading to IPFS...",
     });
 
-    const formData = new FormData();
-    formData.append("file", fileToUpload, uploadFileName);
+    // Converti Blob in File se necessario per l'SDK
+    let fileToUploadFile = fileToUpload;
+    if (fileToUpload instanceof Blob && !(fileToUpload instanceof File)) {
+      fileToUploadFile = new File([fileToUpload], uploadFileName, {
+        type: fileToUpload.type || "application/octet-stream",
+      });
+    } else if (
+      fileToUpload instanceof File &&
+      fileToUpload.name !== uploadFileName
+    ) {
+      // Se il nome del file è diverso, crea un nuovo File con il nome corretto
+      fileToUploadFile = new File([fileToUpload], uploadFileName, {
+        type: fileToUpload.type || "application/octet-stream",
+      });
+    }
 
     try {
-      const response = await fetch(`${this.relayUrl}/api/v1/ipfs/upload`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.authToken}`,
-        },
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `Upload failed: ${response.status}`);
-      }
-
-      const result = await response.json();
+      // Usa SDK per upload file
+      const result = await this.sdk.ipfs.uploadFileBrowser(fileToUploadFile);
 
       if (!result.success || !result.file?.hash) {
         throw new Error(result.error || "Upload failed - invalid response");
@@ -519,41 +641,454 @@ export class DriveCore {
    */
   async getDirectoryContents(directoryCid) {
     try {
+      console.log(`🔍 Fetching directory contents for CID: ${directoryCid}`);
+
       // Usa l'endpoint IPFS ls per ottenere i contenuti della directory
       // Il proxy del relay passa la richiesta all'IPFS API
-      const response = await fetch(
-        `${this.relayUrl}/api/v1/ipfs/api/v0/ls?arg=${encodeURIComponent(
-          directoryCid
-        )}`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: this.authToken
-              ? `Bearer ${this.authToken}`
-              : undefined,
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
-          body: "", // Empty body per POST request
-        }
-      );
+      const url = `${
+        this.relayUrl
+      }/api/v1/ipfs/api/v0/ls?arg=${encodeURIComponent(directoryCid)}`;
+      console.log(`🔍 Request URL: ${url}`);
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: this.authToken
+            ? `Bearer ${this.authToken}`
+            : undefined,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: "", // Empty body per POST request
+      });
 
       if (!response.ok) {
-        throw new Error(`Failed to get directory contents: ${response.status}`);
+        const errorText = await response.text().catch(() => "");
+        console.error(`❌ API Error (${response.status}):`, errorText);
+        throw new Error(
+          `Failed to get directory contents: ${response.status} - ${errorText}`
+        );
       }
 
       const directoryData = await response.json();
+      console.log("🔍 Raw directory data from API:", directoryData);
+
       // IPFS ls restituisce { Objects: [{ Hash: "...", Links: [...] }] }
       // Estrai i Links dalla prima Object
       if (directoryData.Objects && directoryData.Objects.length > 0) {
-        const links = directoryData.Objects[0].Links || [];
+        const firstObject = directoryData.Objects[0];
+        console.log("🔍 First object:", firstObject);
+        const links = firstObject.Links || [];
+        console.log(`🔍 Found ${links.length} links in directory`);
         return { Links: links };
       }
 
+      // Se non ci sono Objects, potrebbe essere una struttura diversa
+      // Prova a cercare Links direttamente nella risposta
+      if (directoryData.Links && Array.isArray(directoryData.Links)) {
+        console.log(
+          `🔍 Found ${directoryData.Links.length} links directly in response`
+        );
+        return { Links: directoryData.Links };
+      }
+
+      console.warn(
+        "⚠️ No Links found in directory data structure:",
+        directoryData
+      );
       return { Links: [] };
     } catch (error) {
-      console.error("Error getting directory contents:", error);
+      console.error("❌ Error getting directory contents:", error);
       throw error;
     }
+  }
+
+  /**
+   * Aggiunge file a una directory esistente
+   * @param directoryCid Il CID della directory esistente
+   * @param newFiles Array di File objects da aggiungere
+   * @param existingFilesMetadata Array di metadati dei file esistenti nella directory
+   * @returns Promise con il nuovo CID della directory aggiornata
+   */
+  async addFilesToDirectory(
+    directoryCid,
+    newFiles,
+    existingFilesMetadata = []
+  ) {
+    if (!this.authToken) {
+      throw new Error("Auth token is required. Please set it in settings.");
+    }
+
+    this.onStatusChange({
+      status: "preparing",
+      message: `Preparing to add files to directory...`,
+    });
+
+    // Raccogli tutti i file (esistenti + nuovi)
+    const allFiles = [];
+
+    // Aggiungi i file esistenti (li dobbiamo scaricare e riconvertire in File)
+    for (const fileMeta of existingFilesMetadata) {
+      try {
+        // Normalizza il path: rimuovi il nome della directory se presente
+        let filePath = fileMeta.path || fileMeta.name;
+        const pathParts = filePath.split("/");
+        // Se il path contiene "/", prendi solo l'ultima parte (nome del file)
+        if (pathParts.length > 1) {
+          filePath = pathParts[pathParts.length - 1];
+        }
+
+        const blob = await this.catFromDirectory(directoryCid, filePath);
+
+        // Verifica che il blob non sia vuoto
+        if (!blob || blob.size === 0) {
+          console.warn(`⚠️ Empty blob for file ${filePath}, skipping`);
+          continue;
+        }
+
+        // Determina il path relativo da usare (priorità: path > name > originalName)
+        const relativePath =
+          fileMeta.path || fileMeta.name || fileMeta.originalName;
+
+        // Crea un File object usando il relativePath come nome (così l'SDK lo userà come path)
+        // Se webkitRelativePath non funziona, file.name sarà comunque corretto
+        const existingFile = new File([blob], relativePath, {
+          type: fileMeta.mimetype || "application/octet-stream",
+        });
+
+        // IMPORTANTE: Imposta webkitRelativePath per mantenere la struttura directory
+        // L'SDK usa webkitRelativePath || file.name per determinare il path
+        try {
+          Object.defineProperty(existingFile, "webkitRelativePath", {
+            value: relativePath,
+            writable: false,
+            configurable: false,
+            enumerable: false,
+          });
+        } catch (defineError) {
+          console.warn(
+            `⚠️ Could not set webkitRelativePath, using file.name (${relativePath}):`,
+            defineError
+          );
+          // Non è un problema critico - l'SDK userà file.name se webkitRelativePath non è disponibile
+        }
+
+        allFiles.push(existingFile);
+      } catch (error) {
+        console.warn(
+          `⚠️ Failed to retrieve existing file ${fileMeta.path}:`,
+          error
+        );
+        // Continua con gli altri file anche se uno fallisce
+      }
+    }
+
+    // Aggiungi i nuovi file e assicurati che abbiano webkitRelativePath se necessario
+    for (const newFile of newFiles) {
+      // Se il nuovo file non ha webkitRelativePath, impostalo usando il nome del file
+      if (!newFile.webkitRelativePath) {
+        Object.defineProperty(newFile, "webkitRelativePath", {
+          value: newFile.name,
+          writable: false,
+        });
+      }
+      allFiles.push(newFile);
+    }
+
+    if (allFiles.length === 0) {
+      throw new Error("No files to upload");
+    }
+
+    // Ottieni il nome della directory dai metadati esistenti o usa un nome di default
+    // Per ora usiamo un approccio semplice: recuperiamo i metadati della directory
+    let folderName = "folder";
+    try {
+      const cachedMetadata = localStorage.getItem(
+        "shogun-drive-metadata-cache"
+      );
+      if (cachedMetadata) {
+        const parsed = JSON.parse(cachedMetadata);
+        const dirMetadata = parsed.data?.[directoryCid];
+        if (dirMetadata?.displayName || dirMetadata?.fileName) {
+          folderName = dirMetadata.displayName || dirMetadata.fileName;
+        }
+      }
+    } catch (e) {
+      console.warn("⚠️ Could not get directory name from metadata:", e);
+    }
+
+    // Usa uploadDirectory per ricreare la directory con tutti i file
+    // Nota: uploadDirectory gestirà la criptazione se necessario
+    const result = await this.uploadDirectory(allFiles, {
+      encrypt: true,
+      folderName: folderName,
+    });
+
+    // Dopo aver creato la nuova directory, elimina la vecchia directory
+    if (
+      result.success &&
+      result.directoryCid &&
+      result.directoryCid !== directoryCid
+    ) {
+      try {
+        console.log(
+          `🗑️ Removing old directory ${directoryCid.substring(
+            0,
+            12
+          )}... and replacing with new one ${result.directoryCid.substring(
+            0,
+            12
+          )}...`
+        );
+
+        // Elimina il pin della vecchia directory
+        try {
+          await this.sdk.ipfs.pinRm(directoryCid);
+          console.log(`✅ Old directory pin removed`);
+        } catch (pinError) {
+          console.warn(`⚠️ Failed to remove old directory pin:`, pinError);
+          // Continua comunque con la rimozione dei metadati
+        }
+
+        // Rimuovi i metadati della vecchia directory usando SDK
+        try {
+          await this.sdk.uploads.removeSystemHash(directoryCid, "drive-user");
+          console.log(`✅ Old directory metadata removed from server`);
+        } catch (metadataError) {
+          console.warn(
+            `⚠️ Error removing old directory metadata:`,
+            metadataError
+          );
+        }
+
+        // Rimuovi dalla cache locale
+        try {
+          const cachedMetadata = localStorage.getItem(
+            "shogun-drive-metadata-cache"
+          );
+          if (cachedMetadata) {
+            const parsed = JSON.parse(cachedMetadata);
+            if (parsed.data && parsed.data[directoryCid]) {
+              delete parsed.data[directoryCid];
+              parsed.timestamp = Date.now();
+              localStorage.setItem(
+                "shogun-drive-metadata-cache",
+                JSON.stringify(parsed)
+              );
+              console.log(`✅ Old directory removed from local cache`);
+            }
+          }
+        } catch (cacheError) {
+          console.warn(
+            `⚠️ Error removing old directory from cache:`,
+            cacheError
+          );
+        }
+      } catch (cleanupError) {
+        console.warn(
+          `⚠️ Error cleaning up old directory (non-critical):`,
+          cleanupError
+        );
+        // Non bloccare l'operazione se la pulizia fallisce
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Rimuove un file da una directory esistente
+   * @param directoryCid Il CID della directory esistente
+   * @param filePathToRemove Il path relativo del file da rimuovere
+   * @param existingFilesMetadata Array di metadati dei file esistenti nella directory
+   * @returns Promise con il nuovo CID della directory aggiornata
+   */
+  async removeFileFromDirectory(
+    directoryCid,
+    filePathToRemove,
+    existingFilesMetadata = []
+  ) {
+    if (!this.authToken) {
+      throw new Error("Auth token is required. Please set it in settings.");
+    }
+
+    this.onStatusChange({
+      status: "preparing",
+      message: `Preparing to remove file from directory...`,
+    });
+
+    // Filtra i file esistenti per rimuovere quello specificato
+    const remainingFilesMetadata = existingFilesMetadata.filter((fileMeta) => {
+      const filePath = fileMeta.path || fileMeta.name;
+      // Normalizza il path per confronto
+      const normalizedPath = filePath.split("/").pop();
+      const normalizedPathToRemove = filePathToRemove.split("/").pop();
+      return normalizedPath !== normalizedPathToRemove;
+    });
+
+    if (remainingFilesMetadata.length === existingFilesMetadata.length) {
+      throw new Error("File not found in directory");
+    }
+
+    // Raccogli i file rimanenti (scarica e riconverti in File)
+    const allFiles = [];
+
+    for (const fileMeta of remainingFilesMetadata) {
+      try {
+        // Normalizza il path: rimuovi il nome della directory se presente
+        let filePath = fileMeta.path || fileMeta.name;
+        const pathParts = filePath.split("/");
+        // Se il path contiene "/", prendi solo l'ultima parte (nome del file)
+        if (pathParts.length > 1) {
+          filePath = pathParts[pathParts.length - 1];
+        }
+
+        const blob = await this.catFromDirectory(directoryCid, filePath);
+
+        // Verifica che il blob non sia vuoto
+        if (!blob || blob.size === 0) {
+          console.warn(`⚠️ Empty blob for file ${filePath}, skipping`);
+          continue;
+        }
+
+        // Determina il path relativo da usare (priorità: path > name > originalName)
+        const relativePath =
+          fileMeta.path || fileMeta.name || fileMeta.originalName;
+
+        // Crea un File object usando il relativePath come nome (così l'SDK lo userà come path)
+        // Se webkitRelativePath non funziona, file.name sarà comunque corretto
+        const existingFile = new File([blob], relativePath, {
+          type: fileMeta.mimetype || "application/octet-stream",
+        });
+
+        // IMPORTANTE: Imposta webkitRelativePath per mantenere la struttura directory
+        // L'SDK usa webkitRelativePath || file.name per determinare il path
+        try {
+          Object.defineProperty(existingFile, "webkitRelativePath", {
+            value: relativePath,
+            writable: false,
+            configurable: false,
+            enumerable: false,
+          });
+        } catch (defineError) {
+          console.warn(
+            `⚠️ Could not set webkitRelativePath, using file.name (${relativePath}):`,
+            defineError
+          );
+          // Non è un problema critico - l'SDK userà file.name se webkitRelativePath non è disponibile
+        }
+
+        allFiles.push(existingFile);
+      } catch (error) {
+        console.warn(
+          `⚠️ Failed to retrieve existing file ${fileMeta.path}:`,
+          error
+        );
+        // Continua con gli altri file anche se uno fallisce
+      }
+    }
+
+    if (allFiles.length === 0 && remainingFilesMetadata.length > 0) {
+      throw new Error("Failed to retrieve remaining files from directory");
+    }
+
+    // Ottieni il nome della directory dai metadati esistenti
+    let folderName = "folder";
+    try {
+      const cachedMetadata = localStorage.getItem(
+        "shogun-drive-metadata-cache"
+      );
+      if (cachedMetadata) {
+        const parsed = JSON.parse(cachedMetadata);
+        const dirMetadata = parsed.data?.[directoryCid];
+        if (dirMetadata?.displayName || dirMetadata?.fileName) {
+          folderName = dirMetadata.displayName || dirMetadata.fileName;
+        }
+      }
+    } catch (e) {
+      console.warn("⚠️ Could not get directory name from metadata:", e);
+    }
+
+    // Se non ci sono più file, potremmo voler eliminare la directory
+    // Ma per ora ricreiamo la directory anche se vuota (con file .keep)
+    if (allFiles.length === 0) {
+      // Crea una directory vuota
+      return await this.createEmptyDirectory(folderName);
+    }
+
+    // Usa uploadDirectory per ricreare la directory con i file rimanenti
+    const result = await this.uploadDirectory(allFiles, {
+      encrypt: true,
+      folderName: folderName,
+    });
+
+    // Dopo aver creato la nuova directory, elimina la vecchia directory
+    if (
+      result.success &&
+      result.directoryCid &&
+      result.directoryCid !== directoryCid
+    ) {
+      try {
+        console.log(
+          `🗑️ Removing old directory ${directoryCid.substring(
+            0,
+            12
+          )}... and replacing with new one ${result.directoryCid.substring(
+            0,
+            12
+          )}...`
+        );
+
+        // Elimina il pin della vecchia directory
+        try {
+          await this.sdk.ipfs.pinRm(directoryCid);
+          console.log(`✅ Old directory pin removed`);
+        } catch (pinError) {
+          console.warn(`⚠️ Failed to remove old directory pin:`, pinError);
+        }
+
+        // Rimuovi i metadati della vecchia directory usando SDK
+        try {
+          await this.sdk.uploads.removeSystemHash(directoryCid, "drive-user");
+          console.log(`✅ Old directory metadata removed from server`);
+        } catch (metadataError) {
+          console.warn(
+            `⚠️ Error removing old directory metadata:`,
+            metadataError
+          );
+        }
+
+        // Rimuovi dalla cache locale
+        try {
+          const cachedMetadata = localStorage.getItem(
+            "shogun-drive-metadata-cache"
+          );
+          if (cachedMetadata) {
+            const parsed = JSON.parse(cachedMetadata);
+            if (parsed.data && parsed.data[directoryCid]) {
+              delete parsed.data[directoryCid];
+              parsed.timestamp = Date.now();
+              localStorage.setItem(
+                "shogun-drive-metadata-cache",
+                JSON.stringify(parsed)
+              );
+              console.log(`✅ Old directory removed from local cache`);
+            }
+          }
+        } catch (cacheError) {
+          console.warn(
+            `⚠️ Error removing old directory from cache:`,
+            cacheError
+          );
+        }
+      } catch (cleanupError) {
+        console.warn(
+          `⚠️ Error cleaning up old directory (non-critical):`,
+          cleanupError
+        );
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -567,44 +1102,62 @@ export class DriveCore {
       throw new Error("Auth token is required. Please set it in settings.");
     }
 
-    // Usa l'API IPFS cat con il percorso completo
-    // Format: /api/v1/ipfs/api/v0/cat?arg=QmDirectory/index.html
-    const fullPath = `${directoryCid}/${filePath}`;
-    const encodedPath = fullPath.includes("/")
-      ? `${encodeURIComponent(directoryCid)}/${filePath
-          .split("/")
-          .map((p) => encodeURIComponent(p))
-          .join("/")}`
-      : encodeURIComponent(fullPath);
-
     this.onStatusChange({
       status: "downloading",
       message: `Downloading ${filePath} from directory...`,
     });
 
     try {
-      const response = await fetch(
-        `${this.relayUrl}/api/v1/ipfs/api/v0/cat?arg=${encodedPath}`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${this.authToken}`,
-            "Content-Type": "application/octet-stream",
-          },
-          body: "", // Empty body per evitare errori di parsing JSON
-        }
-      );
+      // Normalizza il filePath: rimuovi eventuali prefissi di directory
+      // Il filePath dovrebbe essere relativo alla directory radice
+      let normalizedPath = filePath;
 
-      if (!response.ok) {
-        throw new Error(
-          `Failed to cat file from directory: ${response.status}`
-        );
+      // Se il path contiene "/", potrebbe includere il nome della directory
+      // Rimuoviamo tutto prima dell'ultimo "/" se presente
+      const pathParts = normalizedPath.split("/");
+      if (pathParts.length > 1) {
+        // Prendi solo l'ultima parte (il nome del file)
+        normalizedPath = pathParts[pathParts.length - 1];
       }
 
-      const blob = await response.blob();
+      console.log(`🔍 Cat from directory: ${directoryCid}/${normalizedPath}`);
+      console.log(`🔍 File path details:`, {
+        directoryCid,
+        originalPath: filePath,
+        normalizedPath: normalizedPath,
+        fullPath: `${directoryCid}/${normalizedPath}`,
+      });
+
+      // Usa l'SDK del relay invece di chiamate fetch dirette
+      // L'SDK restituisce un Buffer, ma nel browser dobbiamo convertirlo in Blob
+      const buffer = await this.sdk.ipfs.catFromDirectory(
+        directoryCid,
+        normalizedPath
+      );
+
+      // Converti Buffer in Blob per il browser
+      // Buffer è un Uint8Array nel browser quando usato con axios
+      const blob =
+        buffer instanceof ArrayBuffer
+          ? new Blob([buffer])
+          : new Blob([new Uint8Array(buffer)]);
+
+      console.log(
+        `✅ Successfully retrieved file from directory: ${normalizedPath} (${blob.size} bytes)`
+      );
       return blob;
     } catch (error) {
       console.error("Error catting file from directory:", error);
+
+      // Gestisci errori dall'SDK
+      if (error.response) {
+        const errorData = error.response.data || error.response.statusText;
+        throw new Error(
+          `Failed to cat file from directory: ${
+            error.response.status
+          } - ${JSON.stringify(errorData)}`
+        );
+      }
       throw error;
     }
   }
@@ -961,23 +1514,15 @@ export class DriveCore {
     try {
       console.log("💾 Sending metadata to save-system-hash:", metadata);
 
-      const response = await fetch(
-        `${this.relayUrl}/api/v1/user-uploads/save-system-hash`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${this.authToken}`,
-          },
-          body: JSON.stringify(metadata),
-        }
-      );
+      // Usa SDK per salvare metadati
+      const result = await this.sdk.uploads.saveSystemHash(metadata);
 
-      if (response.ok) {
-        const result = await response.json();
+      if (result.success) {
         console.log("✅ File metadata saved successfully:", result);
 
         // Aggiorna anche la cache locale immediatamente
+        // IMPORTANTE: Salva i metadati COMPLETI (incluso il campo files) nella cache locale
+        // perché il server potrebbe non restituire tutti i campi quando vengono recuperati
         try {
           const cachedMetadata = localStorage.getItem(
             "shogun-drive-metadata-cache"
@@ -993,8 +1538,13 @@ export class DriveCore {
             }
           }
 
-          // Aggiungi/aggiorna i metadati nella cache
-          cacheData.data[metadata.hash] = metadata;
+          // Aggiungi/aggiorna i metadati COMPLETI nella cache
+          // Questo preserva il campo 'files' che è essenziale per le directory
+          console.log(
+            "💾 Caching complete metadata with files:",
+            metadata.files ? `${metadata.files.length} files` : "no files"
+          );
+          cacheData.data[metadata.hash] = { ...metadata }; // Copia completa dei metadati
           cacheData.timestamp = Date.now();
 
           localStorage.setItem(
@@ -1040,28 +1590,24 @@ export class DriveCore {
       const controller1 = new AbortController();
       const timeoutId1 = setTimeout(() => controller1.abort(), 10000);
 
-      const pinsResponse = await fetch(`${this.relayUrl}/api/v1/ipfs/pin/ls`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${this.authToken}`,
-        },
-        signal: controller1.signal,
-      });
-
-      clearTimeout(timeoutId1);
-
-      if (!pinsResponse.ok) {
-        if (pinsResponse.status === 401) {
+      // Usa l'SDK invece di fetch
+      let pinsResult;
+      try {
+        pinsResult = await this.sdk.ipfs.pinLs();
+        clearTimeout(timeoutId1);
+      } catch (error) {
+        clearTimeout(timeoutId1);
+        if (error.response && error.response.status === 401) {
           throw new Error(
             "Authentication failed. Please check your auth token in settings."
           );
         }
         throw new Error(
-          `Failed to get pins: ${pinsResponse.status} ${pinsResponse.statusText}`
+          `Failed to get pins: ${error.response?.status || "unknown"} ${
+            error.message || "unknown error"
+          }`
         );
       }
-
-      const pinsResult = await pinsResponse.json();
 
       // Ottieni metadati sistema (opzionale, non blocca se fallisce)
       // Prova prima dalla cache locale, poi dal server
@@ -1095,65 +1641,48 @@ export class DriveCore {
       // Usa un timeout più breve e non aspetta se fallisce
       const fetchMetadataPromise = (async () => {
         try {
-          const controller2 = new AbortController();
-          const timeoutId2 = setTimeout(() => {
-            controller2.abort();
-          }, 15000); // 15 secondi timeout
-
-          const metadataResponse = await fetch(
-            `${this.relayUrl}/api/v1/user-uploads/system-hashes-map`,
-            {
-              method: "GET",
-              headers: {
-                Authorization: `Bearer ${this.authToken}`,
-              },
-              signal: controller2.signal,
-            }
+          // Usa SDK per recuperare system hashes map con timeout
+          const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("Timeout")), 15000)
           );
 
-          clearTimeout(timeoutId2);
+          const metadataData = await Promise.race([
+            this.sdk.uploads.getSystemHashesMap(),
+            timeoutPromise,
+          ]);
 
-          if (metadataResponse.ok) {
-            const metadataData = await metadataResponse.json();
-            const newSystemHashMap = metadataData.systemHashes || {};
-            console.log(
-              "🗂️ System Hash Map retrieved from server:",
-              Object.keys(newSystemHashMap).length,
-              "entries"
+          const newSystemHashMap = metadataData.systemHashes || {};
+          console.log(
+            "🗂️ System Hash Map retrieved from server:",
+            Object.keys(newSystemHashMap).length,
+            "entries"
+          );
+
+          // Aggiorna la cache locale
+          try {
+            localStorage.setItem(
+              "shogun-drive-metadata-cache",
+              JSON.stringify({
+                data: newSystemHashMap,
+                timestamp: Date.now(),
+              })
             );
+          } catch (error) {
+            console.warn("⚠️ Error saving metadata cache:", error);
+          }
 
-            // Aggiorna la cache locale
-            try {
-              localStorage.setItem(
-                "shogun-drive-metadata-cache",
-                JSON.stringify({
-                  data: newSystemHashMap,
-                  timestamp: Date.now(),
-                })
-              );
-            } catch (error) {
-              console.warn("⚠️ Error saving metadata cache:", error);
-            }
+          // Aggiorna la mappa corrente (merge con i dati esistenti)
+          systemHashMap = { ...systemHashMap, ...newSystemHashMap };
 
-            // Aggiorna la mappa corrente (merge con i dati esistenti)
-            systemHashMap = { ...systemHashMap, ...newSystemHashMap };
-
-            if (Object.keys(newSystemHashMap).length > 0) {
-              console.log(
-                "🗂️ System Hash Map keys (first 10):",
-                Object.keys(newSystemHashMap).slice(0, 10)
-              );
-            }
-          } else {
-            console.warn(
-              "⚠️ Failed to fetch system hashes map:",
-              metadataResponse.status,
-              metadataResponse.statusText
+          if (Object.keys(newSystemHashMap).length > 0) {
+            console.log(
+              "🗂️ System Hash Map keys (first 10):",
+              Object.keys(newSystemHashMap).slice(0, 10)
             );
           }
         } catch (error) {
           // Non bloccare se i metadati non sono disponibili
-          if (error.name === "AbortError") {
+          if (error.message === "Timeout") {
             console.log(
               "⏰ System hashes map request timed out, using cached data if available"
             );
@@ -1173,6 +1702,22 @@ export class DriveCore {
           const metadata = systemHashMap[cid] || {};
           const pinType = info.Type || "recursive";
 
+          // Log per debug delle directory
+          if (
+            metadata.isDirectory ||
+            metadata.contentType === "application/x-directory"
+          ) {
+            console.log(
+              `📁 Directory found in pins: ${cid.substring(0, 12)}...`,
+              {
+                isDirectory: metadata.isDirectory,
+                contentType: metadata.contentType,
+                hasFiles: !!metadata.files,
+                fileCount: metadata.fileCount,
+              }
+            );
+          }
+
           return {
             cid,
             type: pinType,
@@ -1182,15 +1727,76 @@ export class DriveCore {
         }
       );
 
+      // Log per debug: verifica directory nei metadati
+      const directoriesInMetadata = Object.entries(systemHashMap).filter(
+        ([cid, meta]) =>
+          meta.isDirectory === true ||
+          meta.contentType === "application/x-directory"
+      );
+      if (directoriesInMetadata.length > 0) {
+        console.log(
+          `📁 Found ${directoriesInMetadata.length} directories in system hash map:`,
+          directoriesInMetadata.map(([cid]) => cid.substring(0, 12) + "...")
+        );
+      }
+
       // Filtra solo i pin diretti: quelli con Type === 'direct' O quelli che hanno metadati (file caricati)
+      // IMPORTANTE: Le directory potrebbero non essere nei pins, ma devono essere mostrate se hanno metadati
       const directPins = allPins.filter((pin) => {
         // Mostra solo pin diretti o quelli con metadati (file caricati dall'utente)
-        return pin.type === "direct" || Object.keys(pin.metadata).length > 0;
+        const hasMetadata = Object.keys(pin.metadata).length > 0;
+        const isDir =
+          pin.metadata.isDirectory === true ||
+          pin.metadata.contentType === "application/x-directory";
+
+        if (hasMetadata && isDir) {
+          console.log(
+            `📁 Found directory in pins: ${pin.cid.substring(0, 12)}...`
+          );
+        }
+
+        return pin.type === "direct" || hasMetadata;
       });
 
       console.log(
         `📋 Total pins: ${allPins.length}, Direct pins: ${directPins.length}`
       );
+
+      // Verifica se ci sono directory nei metadati che non sono nei pins
+      const directoryCids = Object.keys(systemHashMap).filter((cid) => {
+        const meta = systemHashMap[cid];
+        return (
+          meta.isDirectory === true ||
+          meta.contentType === "application/x-directory"
+        );
+      });
+
+      if (directoryCids.length > 0) {
+        console.log(
+          `📁 Found ${directoryCids.length} directories in system hash map:`,
+          directoryCids.map((c) => c.substring(0, 12) + "...")
+        );
+
+        // Aggiungi le directory che non sono nei pins
+        directoryCids.forEach((dirCid) => {
+          const existsInPins = directPins.some((pin) => pin.cid === dirCid);
+          if (!existsInPins) {
+            console.log(
+              `📁 Adding directory ${dirCid.substring(
+                0,
+                12
+              )}... that's not in pins`
+            );
+            // Aggiungi la directory ai directPins anche se non è nei pins
+            directPins.push({
+              cid: dirCid,
+              type: "recursive", // Le directory sono generalmente recursive
+              metadata: systemHashMap[dirCid],
+              rawInfo: {},
+            });
+          }
+        });
+      }
 
       const files = directPins.map(({ cid, metadata, rawInfo: info }) => {
         // Log per debug
@@ -1319,25 +1925,62 @@ export class DriveCore {
   }
 
   /**
-   * Elimina un file (unpin)
+   * Elimina un file o directory (unpin + rimuove metadati)
    */
-  async deleteFile(cid) {
+  async deleteFile(cid, metadata = {}) {
     if (!this.authToken) {
       throw new Error("Auth token is required. Please set it in settings.");
     }
 
     try {
-      const response = await fetch(`${this.relayUrl}/api/v1/ipfs/pin/rm`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this.authToken}`,
-        },
-        body: JSON.stringify({ cid }),
-      });
+      // 1. Rimuovi il pin IPFS usando l'SDK
+      console.log(`🗑️ Removing IPFS pin for ${cid.substring(0, 12)}...`);
+      try {
+        await this.sdk.ipfs.pinRm(cid);
+        console.log(`✅ IPFS pin removed successfully`);
+      } catch (error) {
+        const errorText =
+          error.response?.data || error.message || "Unknown error";
+        throw new Error(
+          `Pin removal failed: ${
+            error.response?.status || "unknown"
+          } - ${JSON.stringify(errorText)}`
+        );
+      }
 
-      if (!response.ok) {
-        throw new Error(`Delete failed: ${response.status}`);
+      // 2. Rimuovi i metadati dal system hash map usando SDK
+      try {
+        console.log(`🗑️ Removing metadata from system hash map...`);
+        await this.sdk.uploads.removeSystemHash(
+          cid,
+          metadata.userAddress || "drive-user"
+        );
+        console.log(`✅ Metadata removed from system hash map`);
+      } catch (metadataError) {
+        console.warn(`⚠️ Error removing metadata:`, metadataError);
+        // Non bloccare se la rimozione dei metadati fallisce
+      }
+
+      // 3. Rimuovi i metadati dalla cache locale
+      try {
+        const cachedMetadata = localStorage.getItem(
+          "shogun-drive-metadata-cache"
+        );
+        if (cachedMetadata) {
+          const parsed = JSON.parse(cachedMetadata);
+          if (parsed.data && parsed.data[cid]) {
+            delete parsed.data[cid];
+            parsed.timestamp = Date.now();
+            localStorage.setItem(
+              "shogun-drive-metadata-cache",
+              JSON.stringify(parsed)
+            );
+            console.log(`✅ Metadata removed from local cache`);
+          }
+        }
+      } catch (cacheError) {
+        console.warn(`⚠️ Error removing from cache:`, cacheError);
+        // Non bloccare se la rimozione dalla cache fallisce
       }
 
       return true;
